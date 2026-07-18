@@ -4,9 +4,7 @@
   "description": "Shaft - Juliana atende + Hunter caça todo dia 9h automaticamente",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js & node hunter-auto.js",
-    "start:bot": "node index.js",
-    "start:hunter": "node hunter-auto.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
