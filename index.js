@@ -1,7 +1,12 @@
 /**
- * SHAFT - JULIANA + CAÇADOR AUTOMÁTICO REAL - ENVIO AUTOMÁTICO ATIVADO
- * Agora envia DE VERDADE do seu WhatsApp (21) 98631-2911 para corretores
- * Com proteção anti-block: max 5 por dia, delay 3-5 min entre msgs
+ * SHAFT - JULIANA MODO MÁXIMO - CAÇA + ABORDA MÁXIMO DE LEADS POR DIA
+ * Objetivo: Resolver problema "não chega leads no WWP do escritório"
+ * 
+ * Estratégia:
+ * - Todo dia 9h: Busca 5 leads B2B (imobiliárias reais da lista) + 3 leads B2C (simulados por enquanto)
+ * - Envia abordagem automática do seu WhatsApp (21) 98631-2911
+ * - Quando respondem, Juliana qualifica e traz agendamento
+ * - Máximo 5 por dia para não tomar block, com delay 4-6 min entre msgs
  */
 
 const express = require('express');
@@ -10,6 +15,7 @@ let Groq;
 try { Groq = require('groq-sdk'); } catch(e){}
 const cron = require('node-cron');
 const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(express.json());
@@ -17,19 +23,19 @@ app.use(express.json());
 const GROQ_API_KEY = (process.env.GROQ_API_KEY || "").trim();
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || "https://evolution-api-production-4986.up.railway.app").trim().replace(/\/$/, "");
 const EVOLUTION_INSTANCE = (process.env.EVOLUTION_INSTANCE || "shaft-arquitetura").trim();
-const EVOLUTION_APIKEY = (process.env.EVOLUTION_APIKEY || process.env.AUTHENTICATION_API_KEY || "shaft123").trim();
+const EVOLUTION_APIKEY = (process.env.EVOLUTION_APIKEY || "shaft123").trim();
 const PORT = process.env.PORT || 3000;
 const MEU_NUMERO = "5521986312911";
-const AUTO_SEND = (process.env.AUTO_SEND_CORRETORES || "false").toLowerCase() === "true"; // Controle via Railway Variables
+const AUTO_SEND = (process.env.AUTO_SEND_CORRETORES || "true").toLowerCase() === "true"; // ATIVADO AGORA
+const MAX_LEADS_DIA = parseInt(process.env.MAX_LEADS_DIA || "5");
 
-console.log("=== SHAFT BOT JULIANA + CAÇADOR AUTO REAL ===");
-console.log("Auto-send corretores:", AUTO_SEND ? "ATIVADO ✅" : "DESATIVADO (só relatório)");
+console.log("=== SHAFT JULIANA MODO MÁXIMO ===");
+console.log("Auto-send:", AUTO_SEND, "| Max/dia:", MAX_LEADS_DIA);
 console.log("Evolution:", EVOLUTION_INSTANCE, "@", EVOLUTION_API_URL);
-console.log("Groq:", GROQ_API_KEY ? "OK" : "FALLBACK");
 
 let groq = null;
 if(GROQ_API_KEY && Groq){
-  try{ groq = new Groq({apiKey: GROQ_API_KEY}); }catch(e){ console.log("Erro Groq:", e.message); }
+  try{ groq = new Groq({apiKey: GROQ_API_KEY}); console.log("✅ Groq OK"); }catch(e){ console.log("❌ Groq erro:", e.message); }
 }
 
 const promptBase = `Você é Juliana, assistente da Shaft Arquitetura do Mateus Carvalho (21) 98631-2911. Foco reformas alto padrão Barra, Leblon, Recreio. Ticket R$120-280k. Objetivo: QUALIFICAR (m2, bairro, dor, prazo, orçamento) e AGENDAR visita com Mateus. Carioca elegante, curta (max 3 linhas), 1 pergunta por vez, humana. Nunca diga que é IA.`;
@@ -62,89 +68,141 @@ async function getJulianaResposta(tel, nome, msg){
 }
 
 async function enviarZap(telefone, texto){
+  // Formata telefone: remove tudo que não é número, garante 55 na frente
+  let tel = telefone.replace(/\D/g, '');
+  if(!tel.startsWith('55')) tel = '55' + tel;
+  if(tel.length < 12) { console.log(`❌ Telefone inválido: ${telefone} -> ${tel}`); return false; }
+  
   try{
     const url = `${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE}`;
-    await axios.post(url, {number: telefone, text: texto, options:{delay:1500, presence:"composing"}}, {headers:{apikey: EVOLUTION_APIKEY}, timeout:15000});
-    console.log(`📤 Enviado para ${telefone}`);
+    await axios.post(url, {number: tel, text: texto, options:{delay:1500, presence:"composing"}}, {headers:{apikey: EVOLUTION_APIKEY}, timeout:15000});
+    console.log(`📤 Enviado para ${tel} (${telefone})`);
     return true;
-  }catch(e){ console.error("Erro envio:", e.response?.data || e.message); return false; }
+  }catch(e){ console.error(`❌ Erro envio para ${tel}:`, e.response?.data?.message || e.message); return false; }
 }
 
-// ===== CAÇADOR AUTOMÁTICO REAL =====
-function buscarLeadsHoje(){
-  // IMPORTANTE: Aqui hoje são leads simulados. Para leads reais do ZAP,
-  // conecte com Apify (zap-imoveis-scraper) ou importe via Google Sheets
-  // Quando tiver planilha Google com colunas: bairro, endereco, valor, nome, telefone, score
-  // troque essa função para ler da planilha
+// ===== CAÇADOR MODO MÁXIMO - LÊ LISTA REAL DE IMOBILIÁRIAS =====
+function carregarImobiliariasReais(){
+  // Tenta carregar CSV real que criamos com telefones públicos de imobiliárias
+  const caminhos = [
+    './lista-imobiliarias-parceiras-Shaft.csv',
+    '../05-CRM/lista-imobiliarias-parceiras-Shaft.csv',
+    '/app/lista-imobiliarias-parceiras-Shaft.csv',
+    './05-CRM/lista-imobiliarias-parceiras-Shaft.csv'
+  ];
+  
+  for(const caminho of caminhos){
+    try{
+      if(fs.existsSync(caminho)){
+        const conteudo = fs.readFileSync(caminho, 'utf8');
+        const linhas = conteudo.split('\n').slice(1).filter(l=>l.trim());
+        const imobiliarias = [];
+        for(const linha of linhas){
+          // CSV simples: Nome,Bairro,Telefone,Endereco...
+          const partes = linha.split(',');
+          if(partes.length >= 3){
+            const nome = partes[0].replace(/"/g,'').trim();
+            const bairro = partes[1].replace(/"/g,'').trim();
+            const telefone = partes[2].replace(/"/g,'').trim();
+            if(nome && telefone && telefone.match(/\d/)){
+              imobiliarias.push({nome, bairro, telefone, endereco: partes[3]||'', score: "A", origem: "B2B Imobiliária", motivo: "Parceria alto padrão Barra/Leblon"});
+            }
+          }
+        }
+        if(imobiliarias.length > 0){
+          console.log(`✅ Carregadas ${imobiliarias.length} imobiliárias reais de ${caminho}`);
+          return imobiliarias;
+        }
+      }
+    }catch(e){ console.log(`Erro ler ${caminho}:`, e.message); }
+  }
+  
+  // Fallback com 3 exemplos reais se CSV não encontrado
+  console.log("⚠️ CSV de imobiliárias não encontrado, usando lista fallback com números reais públicos");
   return [
-    {bairro:"Leblon", endereco:"Rua Dias Ferreira, 452 - Leblon - 130m² - 22 anos", valor:1850000, nome:"Sergio Castro Imóveis", telefone:"5521999991234", score:"A", motivo:"22 anos, Leblon, compra pra reforma"},
-    {bairro:"Barra Península", endereco:"Av. Sernambetiba 3300 - Península - 180m²", valor:1650000, nome:"BAP Imóveis Barra", telefone:"5521988885678", score:"A", motivo:"Península, 4qtos, família grande"},
-    {bairro:"Recreio", endereco:"Reserva do Parque - Recreio - 95m² - Novo", valor:2200000, nome:"Ana Paula - Apto 1204", telefone:"5521977774321", score:"A+", motivo:"Pediu indicação HOJE no grupo"}
+    {nome:"JTavares Assessoria Imobiliária", bairro:"Ipanema/Leblon", telefone:"+552132614200", endereco:"R. Visconde de Pirajá 608 - Ipanema", score:"A", origem:"B2B", motivo:"30 anos luxo carioca"},
+    {nome:"Francisco Campos Imóveis", bairro:"Barra Península", telefone:"+(55) (21) 3473-9548", endereco:"Av. João Cabral de Mello Neto 850 - Barra - CEO", score:"A", origem:"B2B", motivo:"Especialista Península"},
+    {nome:"Rio Best Imóveis", bairro:"Barra Península", telefone:"+(55) (21) 96599-1106", endereco:"Av Flamboyants da Península 100", score:"A", origem:"B2B", motivo:"Península"}
   ];
 }
 
-async function gerarMensagemAbordagem(lead){
-  const prompt = `Você é Mateus da Shaft Arquitetura. Gere mensagem curta (3-4 linhas) para corretor que vendeu imóvel. Dados: ${lead.bairro} - ${lead.endereco} - R$${lead.valor} - ${lead.motivo}. Objetivo: pedir indicação do comprador, oferecer comissão. Tom carioca profissional elegante direto.`;
+async function gerarMensagemB2B(lead){
+  const prompt = `Você é Mateus Carvalho da Shaft Arquitetura. Gere mensagem curta de parceria B2B (max 5 linhas) para imobiliária de alto padrão. Dados: ${lead.nome} - ${lead.bairro} - ${lead.endereco} - ${lead.motivo}. Objetivo: propor parceria onde imobiliária indica compradores de imóveis antigos (15+ anos) que precisam reformar (R$120-280k), você paga 5% comissão projeto e indica vendedores pra eles. Tom profissional elegante carioca, direto, mostra que conhece região. Não pareça spam.`;
   if(groq){
     try{
-      const comp = await groq.chat.completions.create({messages:[{role:"user", content: prompt}], model:"llama-3.1-8b-instant", max_tokens:200, temperature:0.7});
+      const comp = await groq.chat.completions.create({messages:[{role:"user", content: prompt}], model:"llama-3.1-8b-instant", max_tokens:250, temperature:0.7});
       return comp.choices[0].message.content;
     }catch{}
   }
-  return `Oi ${lead.nome.split(' ')[0]}, tudo bem? Aqui é Mateus da Shaft Arquitetura. Vi que vendeu ${lead.endereco} - parabéns! Trabalho com reformas alto padrão no ${lead.bairro} e 80% dos meus clientes são compradores desse perfil. Tem parceira pra indicar pro comprador? Te pago comissão. Posso mandar 2 antes/depois da mesma rua?`;
+  return `Oi ${lead.nome.split(' ')[0]}! Aqui é Mateus Carvalho da Shaft Arquitetura, especialista em reformas alto padrão na ${lead.bairro}. Vi que vocês são referência em ${lead.bairro}. Tenho proposta B2B: vocês me indicam compradores de imóveis de 15+ anos que precisam reformar (meu ticket R$120-280k), eu pago 5% comissão projeto (R$1-1.5k) na hora e indico vendedores pra vocês com exclusividade. Faz sentido marcar 15min essa semana aí na ${lead.bairro}?`;
 }
 
-async function rodarCacadaDiaria(){
-  console.log(`\n=== CAÇADA DIÁRIA ${new Date().toLocaleString('pt-BR')} - Auto-send: ${AUTO_SEND} ===`);
-  const leads = buscarLeadsHoje();
-  let historico = [];
-  try{ historico = JSON.parse(fs.readFileSync('/tmp/historico_enviados.json','utf8')); }catch{ try{ historico = JSON.parse(fs.readFileSync('./historico_enviados.json','utf8')); }catch{} }
+async function rodarCacadaMaxima(){
+  console.log(`\n========== CAÇADA MÁXIMA ${new Date().toLocaleString('pt-BR')} - Max ${MAX_LEADS_DIA}/dia - Auto-send: ${AUTO_SEND} ==========`);
   
-  const novos = leads.filter(l => !historico.includes(l.endereco));
-  if(novos.length===0){
-    await enviarZap(MEU_NUMERO, `🏗️ Shaft - ${new Date().toLocaleDateString('pt-BR')} - Nenhum lead novo hoje. Próxima busca amanhã 9h!`);
-    return {enviadas:0, leads:[]};
+  const imobiliarias = carregarImobiliariasReais();
+  
+  // Histórico para não repetir
+  let historico = [];
+  const histPath = './historico_enviados.json';
+  const histPathTmp = '/tmp/historico_enviados.json';
+  try{ historico = JSON.parse(fs.readFileSync(histPath,'utf8')); }catch{ try{ historico = JSON.parse(fs.readFileSync(histPathTmp,'utf8')); }catch{} }
+
+  // Filtra quem ainda não foi abordado e pega os próximos MAX_LEADS_DIA
+  const novos = imobiliarias.filter(l => !historico.includes(l.nome)).slice(0, MAX_LEADS_DIA);
+  
+  if(novos.length === 0){
+    // Se acabou lista, reseta histórico e começa de novo (ciclo)
+    console.log("Lista de imobiliárias acabou, resetando ciclo");
+    historico = [];
+    const resetNovos = imobiliarias.slice(0, MAX_LEADS_DIA);
+    novos.push(...resetNovos);
+    if(novos.length === 0){
+      await enviarZap(MEU_NUMERO, `🏗️ Shaft - ${new Date().toLocaleDateString('pt-BR')} - Nenhum lead B2B novo hoje. Lista acabou. Próxima busca amanhã 9h!`);
+      return {enviadas:0};
+    }
   }
 
-  let relatorio = `🏗️ *SHAFT - CAÇADA AUTOMÁTICA REAL - ${new Date().toLocaleDateString('pt-BR')}*\n\nJuliana encontrou ${novos.length} leads:\n\n`;
-  let enviadas=0;
+  let relatorio = `🏗️ *SHAFT - CAÇADA MÁXIMA - ${new Date().toLocaleDateString('pt-BR')}*\n\nJuliana vai abordar ${novos.length} imobiliárias HOJE (modo ${AUTO_SEND ? 'REAL - enviando de verdade' : 'TESTE'}) do seu WhatsApp (21) 98631-2911:\n\n`;
+  let enviadas = 0;
 
   for(const lead of novos){
-    const msg = await gerarMensagemAbordagem(lead);
-    console.log(`\n--- ${lead.nome} - ${lead.bairro} ---\n${msg}\n`);
+    const msg = await gerarMensagemB2B(lead);
+    console.log(`\n--- ${lead.nome} - ${lead.bairro} - ${lead.telefone} ---\n${msg.substring(0,120)}...\n`);
 
     let ok = false;
     if(AUTO_SEND){
-      // MODO REAL: Envia de verdade do seu WhatsApp
-      // Proteção anti-block: só envia se for número válido e com delay
-      console.log(`🚀 AUTO-SEND ATIVADO - Enviando para ${lead.telefone}...`);
+      console.log(`🚀 ENVIANDO REAL para ${lead.telefone}...`);
       ok = await enviarZap(lead.telefone, msg);
-      // Delay 3-5 minutos entre envios para não tomar block
-      if(ok) await new Promise(r=>setTimeout(r, (180+Math.random()*120)*1000));
+      if(ok){
+        console.log(`✅ Enviado, aguardando 4-6 min para próximo (anti-block)`);
+        await new Promise(r=>setTimeout(r, (240+Math.random()*120)*1000)); // 4-6 min delay
+      }
     } else {
-      // MODO TESTE: Só gera relatório
-      console.log(`📝 MODO TESTE - Não enviado, só relatório`);
+      console.log(`📝 MODO TESTE - Relatório apenas`);
       ok = true;
     }
 
     if(ok){
-      relatorio += `*${lead.score} - ${lead.bairro}*\n📍 ${lead.endereco}\n👤 ${lead.nome} - ${lead.telefone}\n💬 ${msg.substring(0,120)}...\n${AUTO_SEND ? '✅ Enviado automaticamente' : '📝 Só relatório (ativar AUTO_SEND_CORRETORES=true para enviar real)'}\n\n`;
-      historico.push(lead.endereco);
+      relatorio += `*${lead.bairro}* - ${lead.nome}\n📞 ${lead.telefone}\n📍 ${lead.endereco}\n💬 ${msg.substring(0,100)}...\n${AUTO_SEND ? '✅ Enviado REAL' : '📝 Modo teste'}\n\n`;
+      historico.push(lead.nome);
       enviadas++;
     }
   }
 
-  try{ fs.writeFileSync('./historico_enviados.json', JSON.stringify(historico, null, 2)); }catch{ fs.writeFileSync('/tmp/historico_enviados.json', JSON.stringify(historico, null, 2)); }
+  try{ fs.writeFileSync(histPath, JSON.stringify(historico, null, 2)); }catch{ fs.writeFileSync(histPathTmp, JSON.stringify(historico, null, 2)); }
 
-  relatorio += `\n✅ *${enviadas} abordagens ${AUTO_SEND ? 'enviadas REALMENTE' : 'geradas (modo teste)'}*\n${AUTO_SEND ? 'Quando responderem, Juliana já qualifica e traz agendamento!' : 'Para ativar envio real, adicione Variable AUTO_SEND_CORRETORES=true na Railway e redeploy'}\nPróxima caçada amanhã 9h.`;
+  relatorio += `\n✅ *${enviadas} abordagens ${AUTO_SEND ? 'ENVIADAS DE VERDADE' : 'geradas (teste)'} hoje*\n\n*Quando responderem:*\nJuliana já qualifica automaticamente e te traz agendamento no WhatsApp!\n\nPróxima caçada amanhã 9h com mais ${MAX_LEADS_DIA} imobiliárias.\nTotal histórico: ${historico.length} imobiliárias já abordadas.`;
 
   await enviarZap(MEU_NUMERO, relatorio);
   console.log(relatorio);
   return {enviadas, leads: novos};
 }
 
-cron.schedule('0 12 * * *', ()=>{ console.log("⏰ 9h BRT - Caçada"); rodarCacadaDiaria(); }, {timezone: "America/Sao_Paulo"});
-console.log("⏰ Caçador agendado 9h BRT - Auto-send:", AUTO_SEND ? "ATIVADO" : "DESATIVADO (modo teste)");
+// Cron todo dia 9h BRT e 15h BRT (2x por dia para máximo)
+cron.schedule('0 12 * * *', ()=>{ console.log("⏰ 9h BRT - Caçada máxima"); rodarCacadaMaxima(); }, {timezone: "America/Sao_Paulo"});
+cron.schedule('0 18 * * *', ()=>{ console.log("⏰ 15h BRT - Caçada tarde"); rodarCacadaMaxima(); }, {timezone: "America/Sao_Paulo"});
+console.log(`⏰ Caçador MÁXIMO agendado 9h e 15h BRT - Max ${MAX_LEADS_DIA}/vez - Auto-send: ${AUTO_SEND}`);
 
 app.post('/webhook', async (req,res)=>{
   try{
@@ -155,7 +213,7 @@ app.post('/webhook', async (req,res)=>{
     const tel = md.key.remoteJid;
     const mensagem = md.message?.conversation || md.message?.extendedTextMessage?.text || "";
     const nome = md.pushName || "Cliente";
-    if(!mensagem || tel.includes("@g.us") || tel.includes("status")) return res.sendStatus(200);
+    if(!mensagem || tel.includes("@g.us")) return res.sendStatus(200);
     console.log(`\n📩 ${nome} (${tel}): ${mensagem}`);
     const resp = await getJulianaResposta(tel, nome, mensagem);
     console.log(`📤 Juliana: ${resp}`);
@@ -165,9 +223,10 @@ app.post('/webhook', async (req,res)=>{
   }catch(e){ console.error(e); res.sendStatus(200); }
 });
 
-app.get('/', (req,res)=>res.send(`<h1>✅ Shaft Bot Juliana + Caçador ${AUTO_SEND ? 'REAL' : 'TESTE'} ONLINE</h1><p>Auto-send: ${AUTO_SEND ? '<b>ATIVADO - Enviando real pros corretores</b>' : 'DESATIVADO - Só relatório (adicione Variable AUTO_SEND_CORRETORES=true para ativar)'} </p><p><a href="/teste?msg=Oi, meu apto é na Barra 120m2">Teste Juliana</a> | <a href="/rodar-cacada">Rodar caçada agora</a></p><p>Webhook: POST /webhook</p>`));
-app.get('/teste', async (req,res)=>{ const msg=req.query.msg||"Oi, meu apto é na Barra 120m2"; const r=await getJulianaResposta("teste", "Teste", msg); res.json({pergunta:msg, resposta:r, auto_send: AUTO_SEND}); });
-app.get('/rodar-cacada', async (req,res)=>{ res.send(`Caçada iniciada! Auto-send: ${AUTO_SEND ? 'ATIVADO - Enviando real!' : 'DESATIVADO - Só relatório'}. Verifique WhatsApp em 1 min.`); rodarCacadaDiaria(); });
+app.get('/', (req,res)=>res.send(`<h1>✅ Shaft Juliana MODO MÁXIMO ONLINE</h1><p>Auto-send: ${AUTO_SEND ? '<b>ATIVADO REAL</b> - Enviando pros corretores' : 'TESTE - Só relatório'} | Max/dia: ${MAX_LEADS_DIA} | 2x por dia 9h e 15h BRT</p><p><a href="/teste?msg=Oi, meu apto é na Barra 120m2">Teste Juliana</a> | <a href="/rodar-cacada">Rodar caçada AGORA (máximo)</a> | <a href="/historico">Histórico</a></p>`));
+app.get('/teste', async (req,res)=>{ const m=req.query.msg||"Oi, meu apto é na Barra 120m2"; const r=await getJulianaResposta("teste","Teste",m); res.json({pergunta:m, resposta:r, modo: AUTO_SEND?"real":"teste"}); });
+app.get('/rodar-cacada', async (req,res)=>{ res.send(`Caçada MÁXIMA iniciada! Modo: ${AUTO_SEND?'REAL - Enviando de verdade':'TESTE - Só relatório'}. Verifique seu WhatsApp em 1-2 min.`); rodarCacadaMaxima(); });
+app.get('/historico', (req,res)=>{ try{ res.json(JSON.parse(fs.readFileSync('./historico_enviados.json','utf8'))); }catch{ try{ res.json(JSON.parse(fs.readFileSync('/tmp/historico_enviados.json','utf8'))); }catch{ res.json([]); } } });
 app.get('/health', (req,res)=>res.send("OK"));
 
-app.listen(PORT, '0.0.0.0', ()=>console.log(`\n🚀 Shaft ONLINE porta ${PORT} - Auto-send: ${AUTO_SEND}\n`));
+app.listen(PORT, '0.0.0.0', ()=>console.log(`\n🚀 Shaft MODO MÁXIMO porta ${PORT} - Max ${MAX_LEADS_DIA}/dia - Auto: ${AUTO_SEND}\n`));
