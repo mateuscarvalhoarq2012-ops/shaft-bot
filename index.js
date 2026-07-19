@@ -137,12 +137,12 @@ function gerarFallbackProfissional(estado, dados, nomeCurto, intencao){
   };
 
   // Escolhe repertório por intenção
-  const intencao = dados.intencao || "cliente_reforma";
+  const intencaoAtual = dados.intencao || "cliente_reforma";
   let opcoes;
   
-  if(intencao === "fornecedor_parceria" || intencao === "convite_loja" || intencao === "prestador_servico" || intencao === "parceria_imobiliaria" || intencao === "sindico_reforma"){
-    opcoes = repertorio[intencao];
-  } else if(intencao === "cliente_construcao"){
+  if(intencaoAtual === "fornecedor_parceria" || intencaoAtual === "convite_loja" || intencaoAtual === "prestador_servico" || intencaoAtual === "parceria_imobiliaria" || intencaoAtual === "sindico_reforma"){
+    opcoes = repertorio[intencaoAtual];
+  } else if(intencaoAtual === "cliente_construcao"){
     opcoes = repertorio.cliente_construcao[estado] || repertorio.cliente_construcao[0];
   } else {
     // Cliente reforma e outros clientes
