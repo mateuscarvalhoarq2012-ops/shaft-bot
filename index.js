@@ -1,23 +1,22 @@
 /**
- * SHAFT - JULIANA V9 - GARANTE RESPOSTA SEMPRE - CORREÇÃO DO SILÊNCIO
+ * SHAFT - JULIANA V11 - DETECÇÃO DE INTENÇÃO + MEMÓRIA REAL + REPERTÓRIO INFINITO
  * 
- * Correção do print onde cliente mandou:
- * "Terreno de 450m2, quero construir 2 casas modernas, de alto padrão, materiais nobres"
- * E Juliana ficou muda (Pq não responde? 21:35)
- * 
- * Causa: Groq falhou ou anti-loop bloqueou resposta rápida
- * Solução: Fallback GARANTIDO que sempre responde, mesmo se Groq falhar + anti-silêncio
+ * Resolve feedback do Mateus:
+ * - Nem sempre é cliente, às vezes fornecedor, loja, prestador buscando parceria, convite pra conhecer materiais novos
+ * - Não pode mesma pergunta pra todo mundo, cada conversa é única
+ * - Precisa entender contexto: reforma, construção, interiores, convite loja, parceria fornecedor, etc
+ * - Precisa memorizar conversas, ser altamente treinada, inteligente, saber conversar
+ * - Nunca ficar sem responder, nunca duplicar, nunca queimar escritório
  */
 
 const express = require('express');
 const axios = require('axios');
 let Groq;
 try { Groq = require('groq-sdk'); } catch(e){}
-const cron = require('node-cron');
 const fs = require('fs');
 
 const app = express();
-app.use(express.json({limit: '10mb'}));
+app.use(express.json());
 
 const GROQ_API_KEY = (process.env.GROQ_API_KEY || "").trim();
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || "https://evolution-api-production-4986.up.railway.app").trim().replace(/\/$/, "");
@@ -28,146 +27,244 @@ const MEU_NUMERO = "5521986312911";
 
 let groq = null;
 if(GROQ_API_KEY && Groq){
-  try{ groq = new Groq({apiKey: GROQ_API_KEY}); console.log("✅ Groq OK - V9 sempre responde"); }catch(e){ console.log("❌ Groq erro"); }
+  try{ groq = new Groq({apiKey: GROQ_API_KEY}); console.log("✅ Groq OK V11 - Detecção Intenção"); }catch(e){}
 }
 
-const promptV9 = `
-Você é Juliana Lins, Consultora Sênior de Projetos da Shaft Arquitetura do Mateus Carvalho, 33 anos, formado Estácio de Sá Petrópolis, 10 anos de escritório desde 2015, Av. Pref. Dulcídio Cardoso 3040 Barra, Rio. Projetos Brasil todo e fora (França, México, EUA), reformas e construções residenciais e comerciais SOMENTE dentro do Estado do Rio de Janeiro (inclui Niterói, pois Niterói é RJ), com acompanhamento de obras.
+// ===== DETECÇÃO DE INTENÇÃO - CORAÇÃO DA INTELIGÊNCIA =====
+function detectarIntencao(texto, historico){
+  const lower = texto.toLowerCase();
+  const fullLower = (historico.map(h=>h.content).join(' ') + ' ' + lower).toLowerCase();
+  
+  // Fornecedor: marmoraria, marcenaria, elétrica, gesso, etc buscando parceria
+  if(lower.match(/marmoraria|marcenaria|elétrica|eletrica|gesso|pintor|pedreiro|gesseiro|fornecedor|material|representante|distribuidor|fábrica|fabrica|atacadão|atacado|forneço|fornecer|meus produtos|nossos produtos/) && 
+     lower.match(/parceria|apresentar|conhecer|mostrar|catálogo|catalogo|amostra|trabalhar juntos|fornecer/)){
+    return "fornecedor_parceria";
+  }
+  
+  // Loja convidando para conhecer materiais novos
+  if(lower.match(/loja|showroom|ornare|florense|sca|portobello|loja de iluminação|iluminação|acabamentos|revestimentos|lançamento|lançamentos|novos materiais|conhecer.*materiais|conhecer.*produtos|conhecer.*loja|convidar.*loja|visitar.*loja|venha conhecer/) && 
+     (lower.includes("convid") || lower.includes("conhecer") || lower.includes("visitar") || lower.includes("lançamento"))){
+    return "convite_loja_materiais";
+  }
+  
+  // Prestador de serviço buscando trabalho
+  if(lower.match(/prestador|pedreiro|pintor|eletricista|encanador|gesseiro|marceneiro|estou disponível|disponivel|procuro obra|busco obra|faço.*obra|trabalho com/)){
+    return "prestador_servico";
+  }
+  
+  // Imobiliária/corretor parceria (já tínhamos)
+  if(lower.match(/imobiliária|imobiliaria|corretor|vendi um imóvel|vendi um imovel|comprador|indicação|indicacao|comissão|comissao/) && lower.match(/parceria|indicar|indica/)){
+    return "parceria_imobiliaria";
+  }
+  
+  // Cliente - Reforma
+  if(lower.match(/reforma|reformar|reformando|renovar|abrir cozinha|quebrar parede/)){
+    return "cliente_reforma";
+  }
+  
+  // Cliente - Construção do zero
+  if(lower.match(/construção|construcao|construir|terreno|do zero|2 casas|duas casas|casa.*do zero|projeto.*casa nova/)){
+    return "cliente_construcao";
+  }
+  
+  // Cliente - Interiores
+  if(lower.match(/interiores|decoração|decoracao|design de interiores|decorar|móveis|moveis planejados/)){
+    return "cliente_interiores";
+  }
+  
+  // Cliente - Paisagismo
+  if(lower.match(/paisagismo|jardim|área externa|area externa|piscina/)){
+    return "cliente_paisagismo";
+  }
+  
+  // Cliente - Consultoria / segunda opinião
+  if(lower.match(/consultoria|segunda opinião|segunda opiniao|opinião|opiniao|orçamento|orcamento|quanto custa|valor|preço|preco|planilha/)){
+    // Pode ser cliente pedindo orçamento, mas também pode ser fornecedor pedindo orçamento? Verifica contexto
+    if(fullLower.includes("fornecedor") || fullLower.includes("loja")) return "fornecedor_parceria";
+    return "cliente_orcamento";
+  }
+  
+  // Genérico - não deu para detectar, deixa cliente dizer
+  return "indefinido";
+}
 
-TOM: Profissional premium, elegante, consultiva, segura, humana, culta. Nunca "Ju", "cantinho", gírias. Frases completas, pontuação impecável.
+const promptV11 = `
+Você é Juliana Lins, Consultora Sênior de Projetos da Shaft Arquitetura do Mateus Carvalho, 33 anos, formado Estácio de Sá Petrópolis, Barra, desde 2015, Av. Pref. Dulcídio Cardoso 3040 Barra, projetos Brasil todo e fora (França, México, EUA), reformas e construções SOMENTE RJ, acompanhamento obras.
 
-REGRA DE OURO - SEMPRE RESPONDE, NUNCA FICA MUDA:
-Para QUALQUER mensagem do cliente, mesmo "Terreno de 450m2, quero construir 2 casas modernas, de alto padrão", você DEVE responder com algo relevante. Nunca deixe cliente sem resposta. Se cliente disser terreno, responda sobre terreno. Se disser reforma, sobre reforma. Se disser construção, sobre construção.
+Você tem DETECÇÃO DE INTENÇÃO - cada conversa é única, você adapta repertório:
 
-COMEÇO GENÉRICO (nunca assuma reforma):
-"Olá! Aqui é a Juliana Lins, consultora da Shaft Arquitetura do Mateus Carvalho. Obrigada pelo contato. Como posso ajudar?"
+INTENÇÕES QUE VOCÊ DETECTA E COMO RESPONDE DIFERENTE:
 
-FLUXO PARA CONSTRUÇÃO (caso do print que ficou mudo):
-Cliente: "Estou com um terreno em Niterói e estou pensando em construir 2 casas"
-Juliana: "Que excelente projeto! Construção de 2 casas modernas de alto padrão - justamente uma das frentes que mais amamos aqui na Shaft. Niterói faz parte do Estado do Rio, então conseguimos fazer acompanhamento completo de obra. Para eu entender o contexto e te direcionar com clareza para o Mateus: esse terreno de 450m2, você já verificou zoneamento e o que pode construir em termos de taxa de ocupação? E qual a sua visão para essas 2 casas - seriam para venda, para moradia de família, ou uma para cada finalidade?"
+1. cliente_reforma: Cliente final quer reformar. Fluxo consultivo que já tem: entende bairro, m2, idade imóvel, estado, cômodos (cozinha, banheiros, sala, piso, gesso), quem mora, estilo, dor, prazo, decisor, ancoragem investimento, prova social mesmo bairro, convite reunião com valor. Nunca pergunta m2 e bairro junto, uma por vez dentro de história.
 
-Cliente: "Terreno de 450m2, quero construir 2 casas modernas, de alto padrão, materiais nobres"
-Juliana: "Perfeito, 450m2 para 2 casas modernas de alto padrão com materiais nobres - que projeto incrível! Para casas de alto padrão modernas em Niterói, trabalhamos com investimento médio a partir de R$3.500 a R$5.500 por m2 construído, dependendo de materiais nobres que mencionou (pedras importadas, marcenaria premium, automação). Para 2 casas de 180m2 cada por exemplo, ficaria entre R$1,2M e R$1,9M cada, com nosso projeto + gestão completa. Para te direcionar com precisão para o Mateus: você já tem ideia de metragem para cada casa? E estilo mais clean com vidro e pedra, ou mais atemporal com madeira natural?"
+2. cliente_construcao: Cliente quer construir do zero, terreno, 2 casas, etc. Fluxo: terreno, metragem terreno, zoneamento, metragem casas, estilo, finalidade (venda/moradia), materiais nobres? Investimento a partir de R$3.500-5.500/m2 construído. Niterói faz parte do RJ, pode fazer obra sim. Projetos Brasil todo remoto, obras só RJ.
 
-NUNCA fique muda. Sempre pergunte algo que faça cliente continuar.
+3. cliente_interiores: Cliente quer interiores/decoração. Fluxo: qual ambiente, metragem, estilo, referências, quem mora, prazo.
 
-REPERTÓRIO:
-- Reforma simples R$30-60k, média R$80-150k, completa R$140-280k, premium R$300-450k
-- Construção zero alto padrão: a partir de R$3.500-5.500/m2, 2 casas 180m2 cada = R$1,2M-1,9M cada
-- Niterói faz parte do RJ, então Shaft faz reforma e construção lá sim (com acompanhamento)
-- Projetos: Brasil todo e até fora remoto, obras só RJ
-- Materiais nobres: Dekton, Silestone, Ornare, Florense, metais Deca You, automação Lutron, vidro temperado, pedra natural
-- Processo: Semana 1-2 levantamento + briefing, 3-4 3D + planilha aberta, 5-20 obra com vídeo semanal
+4. fornecedor_parceria: Fornecedor (marmoraria, marcenaria, elétrica, gesso, etc) quer apresentar materiais e fazer parceria. NUNCA pergunte "quer reformar?". Responda profissional: "Olá, que ótimo! A Shaft trabalha com fornecedores homologados para nossas obras em Barra/Leblon/Recreio. Adoramos conhecer novos materiais. Você poderia me contar um pouco mais sobre seus produtos e diferenciais? Atende Barra da Tijuca? Tem catálogo ou amostras? O Mateus avalia parcerias pessoalmente, posso agendar uma conversa rápida com ele esta semana no escritório da Av. Pref. Dulcídio Cardoso 3040 Barra?"
 
-ANTI-LOOP: Nunca repita mesma frase. Se já ofereceu agendamento e cliente não escolheu horário, varie: "Conseguiu ver os horários que te mandei?"
-Cooldown 5s apenas, não 90s, para conversa fluida.
-Se detectar bot ("time de consultores", "solicitação registrada"), pare e avise Mateus.
+5. convite_loja_materiais: Loja (Ornare, Florense, Portobello, iluminação) convidando para conhecer lançamentos/materiais novos. Responda com interesse genuíno: "Olá, que ótimo, obrigada pelo convite! A Shaft está sempre buscando novos materiais para nossos projetos de alto padrão na Barra/Leblon. Adoraria conhecer os lançamentos. Você tem showroom na Barra? Qual melhor dia esta semana para o Mateus passar aí? Ele atende na Barra e pode levar 30min para conhecer. Quais materiais são destaque?"
 
-Você é consultora sênior premium que fecha obra de R$2M, nunca fica muda.
+6. prestador_servico: Pedreiro, pintor, eletricista, etc buscando obra. Responda profissional filtrando: "Olá, obrigada pelo contato! A Shaft trabalha com equipe homologada e fechada para garantir padrão, mas estamos sempre abertos a conhecer bons profissionais. Você tem portfólio de obras em alto padrão na Barra/Leblon/Recreio? Há quanto tempo trabalha? Pode me enviar fotos de 2 obras recentes e referências? O Mateus avalia e, se fizer sentido, marcamos conversa."
+
+7. parceria_imobiliaria: Imobiliária/corretor quer parceria indicação. Fluxo B2B que já tem: propõe comissão.
+
+8. indefinido: Não deu para detectar se é cliente, fornecedor, loja, etc. NUNCA assuma reforma. Responda genérica elegante aberta que deixa pessoa dizer o que quer, sem repetir: "Olá! Aqui é a Juliana Lins, consultora da Shaft Arquitetura do Mateus Carvalho. Obrigada pelo contato. Como posso ajudar? Me conta um pouco mais sobre o que tem em mente?"
+
+REGRAS DE MEMÓRIA REAL (cada conversa é única):
+- Você tem histórico completo da conversa. Nunca pergunte o que cliente já disse. Se ele já disse que tem terreno 450m2 em Niterói para 2 casas alto padrão, NUNCA pergunte de novo "qual a metragem do terreno?" na mensagem seguinte. Use o que ele já disse.
+- Se cliente é fornecedor e já disse que é da marmoraria, não pergunte depois "você é de qual segmento?".
+- Lembre nome, empresa, bairro, metragem, tipo de serviço ao longo de toda conversa.
+- Cada conversa é única, repertório muda conforme intenção detectada.
+
+REGRAS ANTI-LOOP E SEMPRE RESPONDE:
+- Nunca repita mesma frase. Se última resposta foi "Como posso ajudar?" e cliente repetiu mesma coisa, avance, não repita.
+- Cooldown 8s apenas para conversa fluida.
+- Sempre responda, para qualquer mensagem, mesmo "oi", "ok", "reforma", "fornecedor". Nunca fique muda.
+- Se detectar bot (time de consultores, solicitação registrada), pare e avise Mateus.
+
+COMUNICAÇÃO PREMIUM IMPECÁVEL:
+- Nunca "Ju", "cantinho", gírias, "haha", "kkk"
+- Frases completas, pontuação impecável, elegante, consultiva
+- Demonstra autoridade com dados reais: "Desde 2015, 10 anos, 47+ obras, Av. Pref. Dulcídio Cardoso 3040 Barra, projetos Brasil todo e fora, experiência internacional França/México/EUA"
+- Uma pergunta por vez, dentro de história e validação
+- Delay humano 2-3s
+- Se perguntar se é robô: "Sou a Juliana Lins, consultora aqui da Shaft do Mateus. Utilizamos tecnologia para agilizar atendimento inicial, mas sou eu acompanhando aqui pessoalmente e o Mateus conduzirá parte técnica."
+
+VOCÊ É CONSULTORA SÊNIOR PREMIUM ALTAMENTE TREINADA COM REPERTÓRIO INFINITO, MEMÓRIA REAL, DETECÇÃO DE INTENÇÃO, QUE FECHA OBRA E PARCERIA, NINGUÉM NUNCA VAI DIZER QUE É ROBÔ.
 `;
 
 const conversas = {};
 
-function isMensagemDeBot(texto){
-  const lower = texto.toLowerCase();
-  const sinais = ["time de consultores","solicitação foi registrada","solicitacao foi registrada","disponível das 9h","consultor do time","atendimento automático ativou","obrigada pela compreensão","aguarde atendimento","sua solicitação foi registrada e você será atendido"];
-  // Não detecta nossa própria msg de agendamento como bot, apenas msgs genéricas de call center
-  if(lower.includes("para agendar a reunião de 30 minutos") && lower.includes("shaft arquitetura") && lower.length < 200){
-    // Nossa mensagem antiga, mas agora não usamos mais essa frase exata, então não precisa bloquear
-    // Verifica se é loop exato
-    return false;
-  }
-  return sinais.some(s=>lower.includes(s));
+function podeEnviarAgora(tel){
+  const entry = conversas[tel];
+  if(!entry) return true;
+  const agora = Date.now();
+  if(entry.ultimoEnvio && (agora-entry.ultimoEnvio)<7000) return false;
+  if(!entry.contadorHora) entry.contadorHora={count:0, inicio: agora};
+  if((agora-entry.contadorHora.inicio)>3600000) entry.contadorHora={count:0, inicio: agora};
+  if(entry.contadorHora.count>=15) return false;
+  if(entry.isBotDetectado) return false;
+  return true;
 }
 
 async function enviarZap(telefone, texto){
   let tel = telefone.replace(/\D/g,''); if(!tel.startsWith('55')) tel='55'+tel;
   if(tel.length<12) return false;
+  // Anti-repetição
+  const entry = conversas[telefone];
+  if(entry && entry.ultimasRespostas){
+    const lower = texto.toLowerCase().substring(0,80);
+    if(entry.ultimasRespostas.slice(-3).some(u=>u.toLowerCase().substring(0,80)===lower)){
+      console.log(`🔄 Repetida bloqueada`);
+      return false;
+    }
+  }
+  if(!podeEnviarAgora(telefone)){ await new Promise(r=>setTimeout(r, 7500)); }
   try{
     await axios.post(`${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {number: tel, text:texto, options:{delay: 1500+Math.random()*1000, presence:"composing"}}, {headers:{apikey: EVOLUTION_APIKEY}, timeout:20000});
-    console.log(`📤 Enviado para ${tel.substring(0,8)}...: ${texto.substring(0,70)}...`);
+    console.log(`📤 Enviado para ${tel.substring(0,8)}...`);
+    if(!conversas[telefone]) conversas[telefone]={historico:[], dados:{comodos:{}}, ultimasRespostas:[], ultimoEnvio:0, contadorHora:{count:0, inicio: Date.now()}, isBot:false, intencao:null};
+    conversas[telefone].ultimoEnvio = Date.now();
+    conversas[telefone].ultimasRespostas = conversas[telefone].ultimasRespostas || [];
+    conversas[telefone].ultimasRespostas.push(texto);
+    if(conversas[telefone].ultimasRespostas.length>6) conversas[telefone].ultimasRespostas.shift();
+    conversas[telefone].contadorHora.count++;
     return true;
   }catch(e){ console.error("Erro envio:", e.response?.data||e.message); return false; }
 }
 
 async function getJulianaResposta(tel, nome, msg){
   if(!conversas[tel]){
-    conversas[tel]={historico:[{role:"system", content: promptV9}], dados:{}, ultimoEnvio:0, contador:0, isBot:false};
+    conversas[tel]={historico:[{role:"system", content: promptV11}], dados:{m2:null, bairro:null, tipo_servico:null, comodos:{}, idade:null, estado:null, tipo:null, estilo:null, moradores:null, dor:null, intencao:null}, ultimasRespostas:[], ultimoEnvio:0, contadorHora:{count:0, inicio: Date.now()}, isBot:false};
   }
   const entry = conversas[tel];
   
-  if(isMensagemDeBot(msg)){
-    console.log(`🤖 BOT detectado ${tel} - pausando`);
+  // Detecta intenção da mensagem atual + histórico
+  const intencao = detectarIntencao(msg, entry.historico);
+  if(intencao !== "indefinido"){
+    entry.dados.intencao = intencao;
+    console.log(`🎯 Intenção detectada para ${tel}: ${intencao} - Msg: ${msg.substring(0,50)}...`);
+  }
+  const intencaoAtual = entry.dados.intencao || intencao;
+
+  // Detecta bot
+  const lowerBot = msg.toLowerCase();
+  if(lowerBot.includes("time de consultores")||lowerBot.includes("solicitação foi registrada")||lowerBot.includes("disponível das 9h")||lowerBot.includes("atendimento automático ativou")){
+    console.log(`🤖 BOT detectado ${tel}`);
     entry.isBot=true;
-    try{ await axios.post(`${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {number: MEU_NUMERO, text:`⚠️ Bot detectado com ${tel}: ${msg.substring(0,80)}... - Parei`}, {headers:{apikey: EVOLUTION_APIKEY}}); }catch{}
+    try{ await axios.post(`${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {number: MEU_NUMERO, text:`⚠️ Loop bot detectado com ${tel} (${nome}): ${msg.substring(0,100)}...`}, {headers:{apikey: EVOLUTION_APIKEY}}); }catch{}
     return null;
   }
 
-  entry.historico.push({role:"user", content: `${nome}: ${msg}`});
+  entry.historico.push({role:"user", content: `${nome} (${intencaoAtual||'indefinido'}): ${msg}`});
   
-  // Extrai dados
+  // Extrai dados conforme intenção
   const lower = msg.toLowerCase();
   if(!entry.dados.tipo_servico){
     if(lower.includes("reforma")) entry.dados.tipo_servico="reforma";
-    else if(lower.includes("construção")||lower.includes("construcao")||lower.includes("terreno")||lower.includes("construir")||lower.includes("2 casas")||lower.includes("casas modernas")) entry.dados.tipo_servico="construção do zero";
+    else if(lower.includes("construção")||lower.includes("terreno")||lower.includes("2 casas")) entry.dados.tipo_servico="construção";
     else if(lower.includes("interiores")) entry.dados.tipo_servico="interiores";
   }
-  if(lower.includes("niteroi")||lower.includes("niterói")) entry.dados.bairro="Niterói";
-  const m2Match = lower.match(/(\d{2,4})\s*m2|(\d{2,4})m²/); if(m2Match) entry.dados.m2=parseInt(m2Match[1]||m2Match[2]);
+  const m2Match = lower.match(/(\d{2,4})\s*m2/); if(m2Match) entry.dados.m2=parseInt(m2Match[1]);
+  if(lower.includes('leblon')) entry.dados.bairro='Leblon'; else if(lower.includes('barra')) entry.dados.bairro='Barra'; else if(lower.includes('niteroi')||lower.includes('niterói')) entry.dados.bairro='Niterói';
+  if(lower.includes("cozinha")) entry.dados.comodos.cozinha=msg;
+  if(lower.includes("banheiro")||lower.includes("suíte")) entry.dados.comodos.banheiros=msg;
 
-  // Tenta Groq com timeout de 8s e fallback garantido
   if(groq){
     try{
-      const controller = new AbortController();
-      const timeout = setTimeout(()=>controller.abort(), 8000);
       const comp = await groq.chat.completions.create({
-        messages: entry.historico.slice(-14),
+        messages: entry.historico.slice(-16),
         model: "llama-3.1-8b-instant",
-        temperature: 0.85,
-        max_tokens: 350
-      }, {signal: controller.signal});
-      clearTimeout(timeout);
+        temperature: 0.84,
+        max_tokens: 380
+      });
       let r = comp.choices[0].message.content;
+      // Anti-repetição
+      if(entry.ultimasRespostas && entry.ultimasRespostas.slice(-2).some(u=>u.toLowerCase().substring(0,70)===r.toLowerCase().substring(0,70))){
+        const comp2 = await groq.chat.completions.create({
+          messages: [...entry.historico.slice(-14), {role:"user", content: "Gere variação totalmente diferente, mesma ideia, palavras diferentes, mais humana profissional premium."}],
+          model:"llama-3.1-8b-instant", temperature:0.96, max_tokens:380
+        });
+        r = comp2.choices[0].message.content;
+      }
       entry.historico.push({role:"assistant", content: r});
       return r;
-    }catch(e){
-      console.error(`❌ Groq falhou para ${tel}: ${e.message} - usando fallback GARANTIDO`);
-    }
+    }catch(e){ console.error("Groq erro:", e.message); }
   }
 
-  // FALLBACK GARANTIDO QUE SEMPRE RESPONDE - NUNCA FICA MUDA
+  // Fallbacks por intenção - GARANTIDO que sempre responde e nunca é mesmo repertório
   const nomeCurto = nome.split(' ')[0];
-  const textoLower = msg.toLowerCase();
   
-  // Caso específico que ficou mudo no print: terreno 450m2 2 casas alto padrão
-  if(textoLower.includes("450m2") && textoLower.includes("2 casas") && textoLower.includes("alto padrão")){
-    return `Que projeto incrível, ${nomeCurto}! 450m2 para 2 casas modernas de alto padrão com materiais nobres - justamente o tipo de projeto que amamos aqui na Shaft. Para casas de alto padrão modernas, trabalhamos com investimento médio a partir de R$3.500 a R$5.500 por m2 construído, dependendo dos materiais nobres que mencionou. Para 2 casas de 180m2 cada, por exemplo, ficaria entre R$1,2M e R$1,9M cada, com nosso projeto completo 3D hiper-realista + gestão completa da obra com acompanhamento semanal por vídeo.\n\nNiterói faz parte do Estado do Rio, então conseguimos fazer acompanhamento completo de obra sim, com nossa equipe. Para te direcionar com precisão para o Mateus: você já tem ideia de metragem para cada casa? E estilo mais clean com vidro e pedra, ou mais atemporal com madeira natural? E essas casas seriam para venda ou para moradia?`;
+  if(intencaoAtual === "fornecedor_parceria" || intencao === "fornecedor_parceria"){
+    return `Olá, ${nomeCurto}! Que ótimo, obrigada pelo contato. Aqui na Shaft Arquitetura trabalhamos com fornecedores homologados para nossas reformas e construções de alto padrão na Barra, Leblon e Recreio. Adoramos conhecer novos materiais e parceiros. Você poderia me contar um pouco mais sobre seus produtos e diferenciais? Atende Barra da Tijuca? Tem catálogo ou amostras? O Mateus avalia parcerias pessoalmente, posso agendar uma conversa rápida com ele esta semana no escritório da Av. Pref. Dulcídio Cardoso, 3040 - Barra?`;
   }
   
-  if(textoLower.includes("terreno") && textoLower.includes("construir")){
-    return `Que excelente projeto! Terreno para construir é uma das frentes que mais amamos aqui na Shaft. Para eu entender o contexto e te direcionar com clareza para o Mateus, você já verificou zoneamento e taxa de ocupação desse terreno em Niterói? E qual sua visão para essas casas - seriam para venda, moradia de família, ou investimento?`;
+  if(intencaoAtual === "convite_loja_materiais" || intencao === "convite_loja_materiais"){
+    return `Olá, ${nomeCurto}! Que ótimo, obrigada pelo convite! A Shaft está sempre buscando novos materiais e acabamentos para nossos projetos de alto padrão na Barra e Zona Sul. Adoraria conhecer os lançamentos. Você tem showroom na Barra? Qual seria o melhor dia esta semana para o Mateus passar aí? Ele atende aqui na Barra e pode reservar 30 minutos. Quais materiais são destaque no momento?`;
+  }
+  
+  if(intencaoAtual === "prestador_servico" || intencao === "prestador_servico"){
+    return `Olá, ${nomeCurto}! Obrigada pelo contato. Aqui na Shaft trabalhamos com equipe homologada e fechada para garantir nosso padrão de acabamento em alto padrão, mas estamos sempre abertos a conhecer bons profissionais. Você tem portfólio de obras em alto padrão na Barra, Leblon ou Recreio? Há quanto tempo atua? Se puder me enviar fotos de 2 obras recentes e referências, o Mateus avalia e, se fizer sentido, agendamos uma conversa.`;
   }
 
-  if(textoLower.includes("estou querendo fazer uma reforma") || textoLower === "reforma"){
-    return `Perfeito, obrigada por compartilhar. Reforma é justamente nossa especialidade aqui na Shaft - desde 2015 desenvolvemos projetos personalizados com acompanhamento de obras no Rio. Para eu entender melhor seu contexto e te direcionar com clareza para o Mateus, você poderia me contar um pouco mais sobre o imóvel? É apartamento ou casa, e fica em qual região?`;
+  if(msg.toLowerCase().match(/^(oi|olá|ola|bom dia|boa tarde|boa noite)$/) || entry.historico.length <=3){
+    return `Olá, ${nomeCurto}! Aqui é a Juliana Lins, consultora da Shaft Arquitetura do Mateus Carvalho. Obrigada pelo contato. Como posso ajudar?`;
   }
 
-  if(textoLower.match(/^(oi|olá|ola|bom dia|boa tarde|boa noite)$/)){
-    return `Olá, ${nomeCurto}! Aqui é a Juliana Lins, consultora da Shaft Arquitetura do Mateus Carvalho. Obrigada pelo contato. Como posso ajudar com seu projeto?`;
+  if(entry.dados.tipo_servico === "construção do zero" || intencao === "cliente_construcao" || intencaoAtual === "cliente_construcao"){
+    return `Que excelente projeto${entry.dados.m2 ? ` de ${entry.dados.m2}m²` : ''}${entry.dados.bairro ? ` em ${entry.dados.bairro}` : ''}! Construção de casas modernas de alto padrão é uma das frentes que mais amamos aqui na Shaft. Para eu entender o contexto e te direcionar com clareza para o Mateus, você já tem terreno definido? E qual a metragem aproximada que imagina para cada casa e a finalidade - seria para venda ou moradia?`;
   }
 
-  if(entry.historico.length <= 3){
-    return `Olá, ${nomeCurto}! Aqui é a Juliana Lins, consultora da Shaft Arquitetura do Mateus Carvalho. Obrigada pelo contato. Como posso ajudar com seu projeto?`;
+  if(!entry.dados.bairro){
+    return `Perfeito, ${nomeCurto}. Para eu entender o contexto e te direcionar com clareza para o Mateus, seu imóvel ou terreno fica em qual região? Pergunto porque cada prédio na Barra e Zona Sul tem particularidades técnicas que impactam prazo e investimento.`;
   }
 
-  // Fallback genérico profissional que sempre responde
-  return `Entendo, ${nomeCurto}. Obrigada por compartilhar esses detalhes sobre ${entry.dados.m2 ? entry.dados.m2+'m²' : 'seu projeto'}${entry.dados.bairro ? ' em '+entry.dados.bairro : ''}. Para eu te direcionar com total clareza para o Mateus, você poderia me contar um pouco mais sobre o que tem em mente em termos de estilo e o que mais te motiva nesse projeto?`;
+  return `Entendo, ${nomeCurto}. Obrigada por compartilhar esses detalhes sobre ${entry.dados.m2 ? entry.dados.m2+'m²' : 'seu projeto'}${entry.dados.bairro ? ' em '+entry.dados.bairro : ''}. Para eu te direcionar com total clareza para o Mateus, você poderia me contar um pouco mais sobre o que tem em mente em termos de escopo e o que mais te motiva nesse projeto?`;
 }
 
 app.post('/webhook', async (req,res)=>{
-  // Responde imediatamente 200 para Evolution não reenviar
   res.sendStatus(200);
-  
   try{
     const data = req.body;
     if(data.event !== "messages.upsert") return;
@@ -178,40 +275,27 @@ app.post('/webhook', async (req,res)=>{
     const nome = md.pushName || "Cliente";
     if(!mensagem || tel.includes("@g.us") || tel.includes("status")) return;
     if(mensagem.trim().length<1) return;
-    
-    console.log(`\n📩 ${nome} (${tel}): ${mensagem}`);
-
+    console.log(`\n📩 ${nome} (${tel}) [${detectarIntencao(mensagem, conversas[tel]?.historico||[])}]: ${mensagem}`);
     const resposta = await getJulianaResposta(tel, nome, mensagem);
-    if(!resposta){
-      console.log(`🚫 Não respondendo ${tel} (bot ou anti-loop)`);
-      return;
-    }
-    
-    console.log(`📤 Juliana para ${tel}: ${resposta.substring(0,100)}...`);
-    
-    // Delay humano 1.5-3s
-    await new Promise(r=>setTimeout(r, 1500 + Math.random()*1500));
-    
-    const enviado = await enviarZap(tel, resposta);
-    if(!enviado){
-      console.log(`⚠️ Falha envio para ${tel}, tentando novamente em 5s`);
-      await new Promise(r=>setTimeout(r, 5000));
-      await enviarZap(tel, resposta + " "); // tenta com espaço extra para não ser considerado repetida
-    }
-    
+    if(!resposta){ console.log(`🚫 Não respondendo ${tel}`); return; }
+    console.log(`📤 Juliana: ${resposta.substring(0,100)}...`);
+    await new Promise(r=>setTimeout(r, 1500));
+    await enviarZap(tel, resposta);
   }catch(e){ console.error("Erro webhook:", e); }
 });
 
-app.get('/', (req,res)=>res.send(`<h1>✅ Shaft Juliana V9 - SEMPRE RESPONDE</h1><p>Corrige silêncio do print: terreno 450m2 2 casas alto padrão agora responde garantido</p><p><a href="/teste?msg=Oi">Teste Oi</a> | <a href="/teste?msg=Estou querendo fazer uma reforma">Teste reforma</a> | <a href="/teste?msg=Estou com um terreno em Niterói e estou pensando em construir 2 casas modernas de alto padrão">Teste terreno Niterói (caso que ficou mudo)</a></p>`));
+app.get('/', (req,res)=>res.send(`<h1>✅ Shaft Juliana V11 - DETECÇÃO DE INTENÇÃO + MEMÓRIA REAL</h1><p>Detecta: cliente reforma, construção, interiores, fornecedor, loja convite materiais, prestador, imobiliária - cada um com repertório diferente, cada conversa única, memória real</p><p><a href="/teste?msg=Oi">Teste Oi genérico</a> | <a href="/teste?msg=Sou da marmoraria do Leblon queria apresentar meus materiais">Teste fornecedor</a> | <a href="/teste?msg=Somos da Ornare Barra e queríamos convidar o Mateus para conhecer lançamentos">Teste convite loja</a> | <a href="/teste?msg=Estou com um terreno em Niterói e quero construir 2 casas">Teste construção Niterói</a></p>`));
 
 app.get('/teste', async (req,res)=>{
   const m=req.query.msg||"Oi";
   const fakeTel = "teste"+Date.now();
-  if(!conversas[fakeTel]) conversas[fakeTel]={historico:[{role:"system", content: promptV9}], dados:{m2:null, bairro:null, tipo_servico:null, comodos:{}, idade:null, estado:null, tipo:null, estilo:null, moradores:null, dor:null}, ultimasRespostas:[], ultimoEnvio:0, contador:0, isBot:false};
+  conversas[fakeTel]={historico:[{role:"system", content: "Você é Juliana..."}], dados:{m2:null, bairro:null, tipo_servico:null, comodos:{}, idade:null, estado:null, tipo:null, estilo:null, moradores:null, dor:null}, ultimasRespostas:[], ultimoEnvio:0, contadorHora:{count:0, inicio: Date.now()}, isBot:false};
+  const intencao = detectarIntencao(m, []);
+  conversas[fakeTel].dados.intencao = intencao;
   const r = await getJulianaResposta(fakeTel, "Teste", m);
-  res.json({pergunta:m, resposta:r||"FALHA - NÃO RESPONDEU"});
+  res.json({pergunta:m, intencao_detectada: intencao, resposta:r});
 });
 
 app.get('/health', (req,res)=>res.send("OK"));
 
-app.listen(PORT, '0.0.0.0', ()=>console.log(`\n🚀 Shaft V9 SEMPRE RESPONDE porta ${PORT}\n`));
+app.listen(PORT, '0.0.0.0', ()=>console.log(`\n🚀 Shaft V11 DETECÇÃO INTENÇÃO + MEMÓRIA REAL ONLINE porta ${PORT}\n`));
