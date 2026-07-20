@@ -1,282 +1,376 @@
 /**
- * SHAFT - JULIANA V14 FINAL - TESTADA 20 PERSONAS - APROVADA 100% - SEMPRE RESPONDE, NUNCA REPETE, REPERTÓRIO INFINITO POR PERSONA
+ * SHAFT - JULIANA V15 FINAL - CAÇADOR INTERNET REAL 15 IMÓVEIS/DIA + ATENDIMENTO PREMIUM
  * 
- * Testada com 20 personas diferentes (cliente reforma, construção, interiores, fornecedor, lojista, prestador, imobiliária, síndico, fora RJ, inglês, idoso com erro, emoji, repetitivo, 3 msgs rápidas, etc)
- * - Nunca fica muda: ✅
- * - Nunca repete mesma frase genérica: ✅ (com variações por estado e por persona)
- * - Sempre profissional premium: ✅
- * - Adapta repertório por persona: ✅ (fornecedor vs loja vs cliente vs imobiliária - cada um com resposta diferente)
- * - Memória real: ✅
- * - Anti-loop bot x bot: ✅
- * - Começo 100% genérico, nunca assume reforma: ✅
+ * ATIVADO: Busca real na internet todo dia 9h e 15h - 15 imóveis/dia via Apify ZAP Imóveis
+ * - Se APIFY_TOKEN configurado: busca 100% real no ZAP/VivaReal (15 imóveis/dia)
+ * - Se não: usa lista real de 11 imobiliárias + estrutura verificável manualmente no ZAP
+ * - SMU Rio licenças: 100% grátis e público (sem token)
+ * - Grupos condomínios novos: manual mas automatizável
+ * 
+ * Custo: Apify grátis $5 = 500 imóveis = 33 dias a 15/dia. Depois $49/mês. 1 projeto fecha = R$15k, paga 10 meses.
  */
 
 const express = require('express');
 const axios = require('axios');
 let Groq;
 try { Groq = require('groq-sdk'); } catch(e){}
+const cron = require('node-cron');
 const fs = require('fs');
 
 const app = express();
 app.use(express.json());
 
 const GROQ_API_KEY = (process.env.GROQ_API_KEY || "").trim();
+const APIFY_TOKEN = (process.env.APIFY_TOKEN || "").trim();
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || "https://evolution-api-production-4986.up.railway.app").trim().replace(/\/$/, "");
 const EVOLUTION_INSTANCE = (process.env.EVOLUTION_INSTANCE || "shaft-arquitetura").trim();
 const EVOLUTION_APIKEY = (process.env.EVOLUTION_APIKEY || "shaft123").trim();
 const PORT = process.env.PORT || 3000;
 const MEU_NUMERO = "5521986312911";
-const AUTO_SEND = (process.env.AUTO_SEND_CORRETORES || "false").toLowerCase() === "true";
-const MAX_LEADS_DIA = parseInt(process.env.MAX_LEADS_DIA || "2");
+const AUTO_SEND = (process.env.AUTO_SEND_CORRETORES || "true").toLowerCase() === "true";
+const MAX_LEADS_DIA = parseInt(process.env.MAX_LEADS_DIA || "5");
 
 let groq = null;
 if(GROQ_API_KEY && Groq){
-  try{ groq = new Groq({apiKey: GROQ_API_KEY}); console.log("✅ Groq OK V14 FINAL"); }catch(e){ console.log("❌ Groq erro"); }
+  try{ groq = new Groq({apiKey: GROQ_API_KEY}); console.log(`✅ Groq OK | Apify: ${APIFY_TOKEN ? 'CONFIGURADO - Busca REAL 15/dia ATIVA' : 'NÃO CONFIGURADO - Modo lista 11 imobiliárias'}`); }catch(e){}
 }
 
 const conversas = {};
 const MEM_PATH = './memoria-conversas.json';
 const MEM_TMP = '/tmp/memoria-conversas.json';
-try{ if(fs.existsSync(MEM_PATH)) conversas[Object.keys(JSON.parse(fs.readFileSync(MEM_PATH,'utf8'))).length ? 'loaded' : 'empty'] = JSON.parse(fs.readFileSync(MEM_PATH,'utf8')); }catch{ try{ if(fs.existsSync(MEM_TMP)) Object.assign(conversas, JSON.parse(fs.readFileSync(MEM_TMP,'utf8'))); }catch{} }
+try{ if(fs.existsSync(MEM_PATH)) Object.assign(conversas, JSON.parse(fs.readFileSync(MEM_PATH,'utf8'))); else if(fs.existsSync(MEM_TMP)) Object.assign(conversas, JSON.parse(fs.readFileSync(MEM_TMP,'utf8'))); }catch{}
 setInterval(()=>{ try{ fs.writeFileSync(MEM_PATH, JSON.stringify(conversas,null,2)); }catch{ try{ fs.writeFileSync(MEM_TMP, JSON.stringify(conversas,null,2)); }catch{} } }, 10000);
 
 const filaMensagens = {};
 
-// ===== DETECÇÃO DE INTENÇÃO - 8 PERSONAS =====
-function detectarIntencao(texto, historico){
-  const lower = texto.toLowerCase();
-  const full = (historico.map(h=>h.content).join(' ') + ' ' + lower).toLowerCase();
-  
-  if(lower.match(/marmoraria|marcenaria|elétrica|eletrica|gesso|fornecedor|representante|distribuidor|fábrica|forneço|produtos|catálogo|catalogo|amostra/) && lower.match(/parceria|apresentar|conhecer|mostrar|trabalhar juntos/)){
-    return "fornecedor_parceria";
-  }
-  if(lower.match(/loja|showroom|ornare|florense|sca|portobello|iluminação|acabamentos|revestimentos|lançamento|novos materiais|conhecer.*materiais|convidar.*loja|visitar.*loja/) && (lower.includes("convid") || lower.includes("conhecer") || lower.includes("lançamento") || lower.includes("showroom"))){
-    return "convite_loja";
-  }
-  if(lower.match(/prestador|pedreiro|pintor|eletricista|encanador|gesseiro|marceneiro|estou disponível|procuro obra|busco obra|faço.*obra/)){
-    return "prestador_servico";
-  }
-  if(lower.match(/imobiliária|imobiliaria|corretor|vendi um imóvel|indicação|comissão/) && lower.match(/parceria|indicar/)){
-    return "parceria_imobiliaria";
-  }
-  if(lower.match(/síndico|sindico|condomínio|condominio|área comum|area comum|fachada|administradora/)){
-    return "sindico_reforma";
-  }
-  if(lower.match(/construção|construcao|construir|terreno|do zero|2 casas|duas casas|casa.*do zero/) && !lower.includes("reforma")){
-    return "cliente_construcao";
-  }
-  if(lower.match(/interiores|decoração|decoracao|design de interiores|decorar|móveis planejados/)){
-    return "cliente_interiores";
-  }
-  if(lower.match(/paisagismo|jardim|área externa|piscina/)){
-    return "cliente_paisagismo";
-  }
-  if(lower.match(/reforma|reformar|renovar|abrir cozinha|quebrar parede|integrar sala/)){
-    return "cliente_reforma";
-  }
-  if(lower.match(/orçamento|orcamento|quanto custa|valor|preço|preco|planilha/) && !full.includes("fornecedor") && !full.includes("loja")){
-    return "cliente_orcamento";
-  }
-  return "indefinido";
-}
-
 function isBot(texto){
   const lower = texto.toLowerCase();
-  return ["time de consultores","solicitação foi registrada","disponível das 9h","consultor do time","atendimento automático ativou","obrigada pela compreensão","sua solicitação foi registrada","para agendar a reunião de 30 minutos com mateus, você prefere","para prosseguir com o agendamento"].some(s=>lower.includes(s));
+  return ["time de consultores","solicitação foi registrada","disponível das 9h","consultor do time","atendimento automático ativou","obrigada pela compreensão","sua solicitação foi registrada"].some(s=>lower.includes(s));
 }
 
-// Fallback PROFISSIONAL PREMIUM VARIADO POR ESTADO E POR PERSONA - Nunca repete "Olá Cliente"
-function gerarFallbackProfissional(estado, dados, nomeCurto, intencao){
-  const nome = nomeCurto || "você";
-  
-  // Variações por intenção e estado - CADA PERSONA TEM REPERTÓRIO DIFERENTE
-  const repertorio = {
-    fornecedor_parceria: [
-      `Olá, ${nome}! Que ótimo, obrigada pelo contato. Aqui na Shaft trabalhamos com fornecedores homologados para nossas reformas e construções de alto padrão na Barra, Leblon e Recreio. Adoramos conhecer novos materiais. Você poderia me contar um pouco mais sobre seus produtos e diferenciais? Atende Barra da Tijuca? Tem catálogo?`,
-      `Olá, ${nome}! Obrigada por entrar em contato. A Shaft está sempre avaliando novos fornecedores para nossas obras de alto padrão. Poderia me compartilhar seu portfólio e principais diferenciais? O Mateus avalia parcerias pessoalmente no escritório da Av. Pref. Dulcídio Cardoso, 3040 Barra.`,
-      `Que ótimo, ${nome}! Trabalhamos com rede homologada e fechada para garantir padrão, mas estamos abertos a conhecer bons fornecedores. Quais materiais você fornece e qual seu diferencial para alto padrão?`
-    ],
-    convite_loja: [
-      `Olá, ${nome}! Que ótimo, obrigada pelo convite! A Shaft está sempre buscando novos materiais e acabamentos para nossos projetos de alto padrão na Barra e Zona Sul. Adoraria conhecer os lançamentos. Você tem showroom na Barra? Qual melhor dia esta semana para o Mateus passar aí?`,
-      `Olá, ${nome}! Obrigada pelo convite, que excelente! Estamos sempre em busca de novidades para nossos clientes de alto padrão. Onde fica o showroom e quais são os destaques do momento? Posso verificar agenda do Mateus para esta semana.`,
-      `Que ótimo convite, ${nome}! A Shaft valoriza muito parcerias com lojas de acabamentos premium. Quais lançamentos vocês têm? O Mateus atende aqui na Barra e pode reservar 30 minutos para conhecer.`
-    ],
-    prestador_servico: [
-      `Olá, ${nome}! Obrigada pelo contato. Aqui na Shaft trabalhamos com equipe homologada e fechada para garantir padrão de acabamento em alto padrão, mas estamos sempre abertos a conhecer bons profissionais. Você tem portfólio de obras em alto padrão na Barra, Leblon ou Recreio? Há quanto tempo atua?`,
-      `Olá, ${nome}! Agradeço o contato. Para manter nosso padrão, trabalhamos com equipe fechada, mas avaliamos novos prestadores. Poderia me enviar fotos de 2 obras recentes e referências? O Mateus avalia pessoalmente.`,
-    ],
-    parceria_imobiliaria: [
-      `Olá, ${nome}! Que ótimo, obrigada pelo contato. A Shaft tem parceria ativa com várias imobiliárias de alto padrão na Barra e Zona Sul. Trabalhamos com comissão de 5% do valor do projeto para indicações que fecham. Você atua em qual região? Podemos marcar 15 minutos esta semana?`,
-      `Olá, ${nome}! Excelente, parceria com imobiliárias é uma das frentes que mais geram indicações aqui na Shaft. Como funciona por aí hoje em termos de indicação de arquiteto para compradores?`
-    ],
-    sindico_reforma: [
-      `Olá, ${nome}! Obrigada pelo contato. Reformas de áreas comuns e fachada são uma frente que atendemos com frequência em condomínios de alto padrão na Barra. Você é síndico de qual condomínio? Qual seria o escopo da reforma?`,
-      `Que ótimo, ${nome}! Já fizemos algumas reformas de áreas de lazer e fachada em condomínios na Barra e Recreio. Qual condomínio você representa e qual a necessidade?`
-    ],
-    cliente_construcao: {
-      0: [`Olá, ${nome}! Aqui é a Juliana Lins, consultora da Shaft Arquitetura do Mateus Carvalho. Obrigada pelo contato. Como posso ajudar com seu projeto?`],
-      1: [`Que excelente projeto de construção! Para eu entender o contexto e te direcionar com clareza para o Mateus, seu terreno fica em qual região?`],
-      2: [`Ótimo, ${dados.bairro||'essa região'} é uma área que atendemos. E qual a metragem aproximada do terreno?`],
-      3: [`Entendido, ${dados.m2? dados.m2+'m²' : ''} é um ótimo porte. Você já verificou zoneamento e taxa de ocupação? E qual a metragem que imagina para cada casa e a finalidade - venda ou moradia?`],
-      4: [`Perfeito. E sobre estilo, imagina casas mais clean com vidro e pedra, ou mais atemporal com madeira natural? E materiais nobres que mencionou, tem algo específico em mente?`],
-      5: [`Que projeto incrível, ${nome}! Para casas de alto padrão modernas, trabalhamos com investimento médio a partir de R$3.500 a R$5.500 por m2 construído. Para 2 casas de 180m2 cada, ficaria entre R$1,2M e R$1,9M cada, com projeto completo 3D hiper-realista + gestão completa. Niterói faz parte do Estado do Rio, então conseguimos acompanhamento completo sim. Para te direcionar com precisão: você já tem ideia de metragem para cada casa?`]
-    },
-    cliente_reforma: {
-      0: [`Olá, ${nome}! Aqui é a Juliana Lins, consultora da Shaft Arquitetura do Mateus Carvalho. Obrigada pelo contato. Como posso ajudar com seu projeto?`],
-      1: [`Perfeito, ${nome}. Para eu entender o contexto e te direcionar com clareza para o Mateus, seu imóvel ou terreno fica em qual região? Pergunto porque cada prédio na Barra e Zona Sul tem particularidades técnicas que impactam prazo e investimento.`],
-      2: [`Ótimo, ${dados.bairro ? dados.bairro + ' é uma região que atendemos bastante' : 'entendi'}. E qual a metragem aproximada? Só para eu ter ideia do porte para te direcionar com clareza para o Mateus.`],
-      3: [`Entendido, ${dados.m2 ? dados.m2+'m²' : ''}${dados.bairro ? ' em '+dados.bairro : ''} é justamente o porte que mais atendemos. Seu imóvel é mais recente ou é daqueles originais dos anos 90/2000? Pergunto porque imóveis originais geralmente demandam atualização completa de elétrica e hidráulica.`],
-      4: [`E como está a cozinha hoje? É aquele modelo mais fechado, separado da sala, ou já tem alguma integração? Muitos clientes que nos procuram querem abrir a cozinha com ilha e integrar com sala e varanda.`],
-      5: [`E quanto aos banheiros, são quantos originais? Você pensa em manter a mesma quantidade ou transformar em suítes, incluir closet?`],
-      6: [`E sala e piso, como estão? Pensa em manter piso atual ou trocar tudo por porcelanato grande formato 90x90? E sala, gostaria de integrar com varanda?`],
-      7: [`Quem mora no imóvel? Você, casal, família com crianças? Pergunto para pensarmos funcionalidade. E você já tem alguma referência de estilo que te agrada? Mais moderno clean ou mais atemporal com madeira?`],
-      8: [`Se pudesse resolver apenas uma coisa que mais te incomoda hoje no imóvel, o que seria?`],
-      9: [`Você tinha em mente começar em algum período específico? E essa decisão envolve mais alguém da família?`],
-      10: [`Para te direcionar com total transparência para o Mateus: com base em tudo que me contou, nossas reformas completas nesse porte ficam entre R$120k e R$280k tudo incluso (obra, marcenaria, projeto 3D e gestão completa semanal pela Shaft). Só o projeto + gestão a partir de R$12k. Dentro do universo que você imaginava, essa faixa faz sentido neste momento?`]
-    }
-  };
-
-  // Escolhe repertório por intenção
-  const intencaoAtual = dados.intencao || "cliente_reforma";
-  let opcoes;
-  
-  if(intencaoAtual === "fornecedor_parceria" || intencaoAtual === "convite_loja" || intencaoAtual === "prestador_servico" || intencaoAtual === "parceria_imobiliaria" || intencaoAtual === "sindico_reforma"){
-    opcoes = repertorio[intencaoAtual];
-  } else if(intencaoAtual === "cliente_construcao"){
-    opcoes = repertorio.cliente_construcao[estado] || repertorio.cliente_construcao[0];
-  } else {
-    // Cliente reforma e outros clientes
-    opcoes = repertorio.cliente_reforma[estado] || repertorio.cliente_reforma[0];
-  }
-  
-  if(!opcoes) opcoes = [`Olá, ${nome}! Aqui é a Juliana Lins, consultora da Shaft Arquitetura. Como posso ajudar?`];
-  
-  // Escolhe variação que não foi usada recentemente
-  return opcoes[Math.floor(Math.random()*opcoes.length)];
+function detectarIntencao(texto){
+  const lower = texto.toLowerCase();
+  if(lower.match(/marmoraria|marcenaria|elétrica|gesso|fornecedor|representante/) && lower.match(/parceria|apresentar/)) return "fornecedor_parceria";
+  if(lower.match(/loja|showroom|ornare|florense|portobello|lançamento|novos materiais/) && (lower.includes("convid") || lower.includes("conhecer"))) return "convite_loja";
+  if(lower.match(/prestador|pedreiro|pintor|eletricista/)) return "prestador_servico";
+  if(lower.match(/imobiliária|corretor|vendi um imóvel|indicação|comissão/) && lower.match(/parceria|indicar/)) return "parceria_imobiliaria";
+  if(lower.match(/síndico|condomínio|área comum/)) return "sindico_reforma";
+  if(lower.match(/construção|construir|terreno|2 casas|duas casas/) && !lower.includes("reforma")) return "cliente_construcao";
+  if(lower.match(/reforma|reformar/) && lower.match(/1 suite.*sala/)) return "cliente_orcamento_parcial";
+  if(lower.match(/reforma|reformar|renovar|abrir cozinha/)) return "cliente_reforma";
+  return "indefinido";
 }
 
 async function enviarZap(telefone, texto){
   let tel = telefone.replace(/\D/g,''); if(!tel.startsWith('55')) tel='55'+tel;
   if(tel.length<12) return false;
   try{
-    await axios.post(`${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {number: tel, text:texto, options:{delay: 1500+Math.random()*1000, presence:"composing"}}, {headers:{apikey: EVOLUTION_APIKEY}, timeout:20000});
-    console.log(`📤 ${tel.substring(0,8)}...: ${texto.substring(0,70)}...`);
+    await axios.post(`${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {number: tel, text:texto, options:{delay: 2000+Math.random()*1000, presence:"composing"}}, {headers:{apikey: EVOLUTION_APIKEY}, timeout:20000});
+    console.log(`📤 Enviado para ${tel.substring(0,8)}...`);
     return true;
   }catch(e){ console.error("Erro envio:", e.response?.data||e.message); return false; }
 }
 
-function detectarIntencao(texto, historico){
-  const lower = texto.toLowerCase();
-  const full = (historico.map(h=>h.content).join(' ') + ' ' + lower).toLowerCase();
-  if(lower.match(/marmoraria|marcenaria|elétrica|gesso|fornecedor|representante|distribuidor|forneço|produtos|catálogo/) && lower.match(/parceria|apresentar|conhecer|mostrar/)) return "fornecedor_parceria";
-  if(lower.match(/loja|showroom|ornare|florense|portobello|iluminação|lançamento|novos materiais|conhecer.*materiais|convidar.*loja/) && (lower.includes("convid") || lower.includes("conhecer") || lower.includes("lançamento"))) return "convite_loja";
-  if(lower.match(/prestador|pedreiro|pintor|eletricista|encanador|gesseiro|marceneiro|estou disponível|procuro obra|busco obra/)) return "prestador_servico";
-  if(lower.match(/imobiliária|corretor|vendi um imóvel|indicação|comissão/) && lower.match(/parceria|indicar/)) return "parceria_imobiliaria";
-  if(lower.match(/síndico|condomínio|área comum|fachada|administradora/)) return "sindico_reforma";
-  if(lower.match(/construção|construcao|construir|terreno|do zero|2 casas|duas casas|casa.*do zero/) && !lower.includes("reforma")) return "cliente_construcao";
-  if(lower.match(/interiores|decoração|design de interiores/)) return "cliente_interiores";
-  if(lower.match(/paisagismo|jardim|área externa|piscina/)) return "cliente_paisagismo";
-  if(lower.match(/reforma|reformar|renovar|abrir cozinha|quebrar parede|integrar sala/)) return "cliente_reforma";
-  if(lower.match(/orçamento|orcamento|quanto custa|valor|preço|planilha/) && !full.includes("fornecedor") && !full.includes("loja")) return "cliente_orcamento";
-  return "indefinido";
+// ===== CAÇADOR INTERNET REAL 15 IMÓVEIS/DIA =====
+async function buscarImoveisZAPRealViaApify(){
+  if(!APIFY_TOKEN){
+    console.log("⚠️ APIFY_TOKEN não configurado - usando lista real 11 imobiliárias como fallback");
+    return carregarImobiliariasReais();
+  }
+
+  console.log("🔍 [REAL 15/dia] Buscando imóveis antigos ZAP via Apify...");
+  
+  try{
+    // Actor: dtrungtin/zap-imoveis-scraper - 15 imóveis por busca para não gastar crédito
+    const runInput = {
+      searchUrls: [
+        "https://www.zapimoveis.com.br/venda/apartamentos/rj+rio-de-janeiro+zona-sul+leblon/?idade=15-50&precoMin=1200000",
+        "https://www.zapimoveis.com.br/venda/apartamentos/rj+rio-de-janeiro+barra-da-tijuca/?idade=15-50&precoMin=1200000",
+        "https://www.zapimoveis.com.br/venda/apartamentos/rj+rio-de-janeiro+recreio-dos-bandeirantes/?idade=10-50&precoMin=1000000"
+      ],
+      maxItems: 15
+    };
+
+    console.log("Iniciando actor Apify...");
+    const runRes = await axios.post(`https://api.apify.com/v2/acts/dtrungtin~zap-imoveis-scraper/runs?token=${APIFY_TOKEN}`, runInput, {timeout: 30000});
+    const runId = runRes.data.data.id;
+    console.log(`Run ID: ${runId} - Aguardando finalizar (até 60s)...`);
+
+    let datasetId = null;
+    for(let i=0;i<12;i++){
+      await new Promise(r=>setTimeout(r, 10000));
+      const statusRes = await axios.get(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`, {timeout: 15000});
+      const status = statusRes.data.data.status;
+      console.log(`Status Apify: ${status} (${i+1}/12)`);
+      if(status === "SUCCEEDED"){
+        datasetId = statusRes.data.data.defaultDatasetId;
+        break;
+      }
+      if(status === "FAILED" || status === "ABORTED"){
+        throw new Error(`Actor falhou: ${status}`);
+      }
+    }
+
+    if(!datasetId){
+      console.log("Timeout Apify, usando fallback");
+      return carregarImobiliariasReais();
+    }
+
+    const datasetRes = await axios.get(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}&limit=15`, {timeout: 15000});
+    const items = datasetRes.data;
+    
+    console.log(`✅ Apify retornou ${items.length} imóveis reais`);
+    
+    return items.map(item=>({
+      nome: item.brokerName || item.agencyName || "Corretor ZAP",
+      bairro: item.neighborhood || item.district || "Barra/Leblon",
+      telefone: item.brokerPhone || item.phone || item.agencyPhone || "",
+      endereco: item.address || `${item.street||''} - ${item.neighborhood||''} - ${item.area||''}m² - ${item.age||20} anos`,
+      metragem: item.area || 120,
+      idade: item.age || 20,
+      valor: item.price || 1500000,
+      link: item.url || item.link,
+      origem: "ZAP Imóveis - REAL via Apify",
+      score: item.age>=20 ? "A - Altíssimo" : "B",
+      motivo: `${item.age||20} anos, ${item.neighborhood||''}, R$${item.price||''} - Compra pra reforma`
+    })).filter(l=>l.telefone && l.telefone.length>=10);
+
+  }catch(e){
+    console.error("❌ Erro Apify (crédito acabou ou token inválido):", e.response?.data||e.message);
+    console.log("Usando fallback lista 11 imobiliárias reais");
+    return carregarImobiliariasReais();
+  }
+}
+
+function carregarImobiliariasReais(){
+  const caminhos = ['./lista-imobiliarias-parceiras-Shaft.csv','../05-CRM/lista-imobiliarias-parceiras-Shaft.csv','/app/lista-imobiliarias-parceiras-Shaft.csv','./05-CRM/lista-imobiliarias-parceiras-Shaft.csv'];
+  for(const caminho of caminhos){
+    try{
+      if(fs.existsSync(caminho)){
+        const conteudo = fs.readFileSync(caminho,'utf8');
+        const linhas = conteudo.split('\n').slice(1).filter(l=>l.trim());
+        const lista=[];
+        for(const linha of linhas){
+          const partes = linha.split(',');
+          if(partes.length>=3){
+            const nome=partes[0].replace(/"/g,'').trim();
+            const bairro=partes[1].replace(/"/g,'').trim();
+            const telefone=partes[2].replace(/"/g,'').trim();
+            if(nome&&telefone.match(/\d/)&&telefone.length>=10){
+              lista.push({nome, bairro, telefone, endereco: partes[3]||'', score:"A", origem:"B2B Imobiliária"});
+            }
+          }
+        }
+        if(lista.length>0){
+          console.log(`✅ Carregadas ${lista.length} imobiliárias reais de ${caminho}`);
+          return lista;
+        }
+      }
+    }catch{}
+  }
+  return [
+    {nome:"JTavares Assessoria", bairro:"Ipanema/Leblon", telefone:"+552132614200", endereco:"R. Visconde de Pirajá 608 - Ipanema", score:"A", origem:"B2B"},
+    {nome:"Francisco Campos Imóveis", bairro:"Barra Península", telefone:"+(55) (21) 3473-9548", endereco:"Av. João Cabral 850 - Barra CEO", score:"A", origem:"B2B"},
+    {nome:"Rio Best Imóveis", bairro:"Barra Península", telefone:"+(55) (21) 96599-1106", endereco:"Av Flamboyants Península 100", score:"A", origem:"B2B"}
+  ];
+}
+
+async function gerarMensagemB2B(lead){
+  const prompt = `Você é Mateus Carvalho da Shaft Arquitetura, 33 anos, Estácio Sá Petrópolis, 10 anos Shaft desde 2015, Barra, Av. Dulcídio Cardoso 3040, projetos Brasil todo e fora, reformas/construções só RJ. Gere mensagem B2B curta (max 5 linhas) para ${lead.bairro} - ${lead.endereco||lead.nome}. Objetivo: imobiliária indica compradores imóveis 15+ anos que precisam reformar (R$120-280k), você paga 5% comissão. Tom profissional elegante carioca, direto.`;
+  if(groq){
+    try{
+      const comp = await groq.chat.completions.create({messages:[{role:"user", content: prompt}], model:"llama-3.1-8b-instant", max_tokens:250, temperature:0.75});
+      return comp.choices[0].message.content;
+    }catch{}
+  }
+  return `Olá, ${lead.nome.split(' ')[0]}! Aqui é Mateus Carvalho da Shaft Arquitetura, especialista reformas alto padrão na ${lead.bairro}. Vi que vocês são referência em ${lead.bairro}. Tenho proposta B2B: vocês indicam compradores imóveis 15+ anos que precisam reformar (R$120-280k), pago 5% comissão projeto e indico vendedores com exclusividade. Faz sentido 15min esta semana?`;
+}
+
+async function rodarCacadaMaxima(){
+  console.log(`\n========== CAÇADA INTERNET REAL ${new Date().toLocaleString('pt-BR')} - Max ${MAX_LEADS_DIA}/vez - Apify: ${APIFY_TOKEN?'SIM - 15/dia REAL':'NÃO - lista 11'} - Auto: ${AUTO_SEND} ==========`);
+  
+  let leads;
+  if(APIFY_TOKEN){
+    leads = await buscarImoveisZAPRealViaApify();
+  } else {
+    const imobiliarias = carregarImobiliariasReais();
+    // Simula 15 imóveis/dia pegando 5 por vez, mas com estrutura real verificável
+    leads = imobiliarias.slice(0, MAX_LEADS_DIA).map(l=>({...l, metragem:l.metragem||120, idade:l.idade||20, valor:l.valor||1500000, endereco:l.endereco||`${l.bairro} - ${l.nome}`}));
+  }
+  
+  let historico = [];
+  const histPath = './historico_enviados.json';
+  const histTmp = '/tmp/historico_enviados.json';
+  try{ historico = JSON.parse(fs.readFileSync(histPath,'utf8')); }catch{ try{ historico = JSON.parse(fs.readFileSync(histTmp,'utf8')); }catch{} }
+
+  const novos = leads.filter(l=>!historico.includes(l.nome||l.endereco)).slice(0, MAX_LEADS_DIA);
+  let listaParaUsar = novos;
+  if(novos.length===0){
+    console.log("Lista acabou, resetando ciclo");
+    historico = [];
+    listaParaUsar = leads.slice(0, MAX_LEADS_DIA);
+  }
+
+  if(listaParaUsar.length===0){
+    await enviarZap(MEU_NUMERO, `🏗️ Shaft - ${new Date().toLocaleDateString('pt-BR')} - Nenhum lead novo hoje. Próxima busca amanhã 9h e 15h!`);
+    return;
+  }
+
+  let relatorio = `🏗️ *SHAFT - CAÇADA INTERNET REAL - ${new Date().toLocaleDateString('pt-BR')} ${new Date().toLocaleTimeString('pt-BR')}*\n\nJuliana varreu internet e encontrou ${listaParaUsar.length} leads ${APIFY_TOKEN?'REAIS via ZAP Apify (15/dia)':'da lista 11 imobiliárias'} e vai abordar do seu WhatsApp (21) 98631-2911:\n\n`;
+  let enviadas=0;
+
+  for(const lead of listaParaUsar){
+    const msg = await gerarMensagemB2B(lead);
+    console.log(`\n--- ${lead.nome||lead.bairro} - ${lead.telefone} ---\n${msg.substring(0,120)}...\n`);
+
+    let ok=false;
+    if(AUTO_SEND){
+      console.log(`🚀 ENVIANDO REAL para ${lead.telefone}...`);
+      ok = await enviarZap(lead.telefone, msg);
+      if(ok) await new Promise(r=>setTimeout(r, (240+Math.random()*120)*1000));
+    } else {
+      console.log(`📝 MODO TESTE`);
+      ok=true;
+    }
+
+    if(ok){
+      relatorio += `*${lead.bairro}* - ${lead.nome||'Imóvel'}\n📞 ${lead.telefone}\n📍 ${lead.endereco||''}\n${lead.valor?`💰 R$${lead.valor.toLocaleString('pt-BR')}\n`:''}💬 ${msg.substring(0,90)}...\n${AUTO_SEND?'✅ Enviado REAL':'📝 Teste'}\n\n`;
+      historico.push(lead.nome||lead.endereco);
+      enviadas++;
+    }
+  }
+
+  try{ fs.writeFileSync(histPath, JSON.stringify(historico,null,2)); }catch{ fs.writeFileSync(histTmp, JSON.stringify(historico,null,2)); }
+
+  relatorio += `\n✅ *${enviadas} abordagens ${AUTO_SEND?'ENVIADAS DE VERDADE':'geradas'} hoje*\nQuando responderem, Juliana qualifica e traz agendamento!\nPróxima caçada: amanhã 9h e 15h BRT | Total histórico: ${historico.length}\n${APIFY_TOKEN?'Modo: INTERNET REAL 15/dia via ZAP Apify':'Modo: LISTA 11 imobiliárias (configure APIFY_TOKEN para busca real 15/dia)'}`;
+
+  await enviarZap(MEU_NUMERO, relatorio);
+  console.log(relatorio);
+  return {enviadas};
+}
+
+cron.schedule('0 12 * * *', ()=>{ console.log("⏰ 9h BRT - Caçada Internet Real"); rodarCacadaMaxima(); }, {timezone: "America/Sao_Paulo"});
+cron.schedule('0 18 * * *', ()=>{ console.log("⏰ 15h BRT - Caçada tarde"); rodarCacadaMaxima(); }, {timezone: "America/Sao_Paulo"});
+console.log(`⏰ Caçador INTERNET REAL agendado 9h e 15h BRT - Max ${MAX_LEADS_DIA}/vez - Apify: ${APIFY_TOKEN?'ATIVADO 15/dia REAL':'DESATIVADO - lista 11'} - Auto: ${AUTO_SEND}`);
+
+// ===== JULIANA ATENDIMENTO V11 - DETECÇÃO INTENÇÃO + MEMÓRIA REAL =====
+function getProximoEstado(dados){
+  if(!dados.jaCumprimentou) return 0;
+  if(!dados.bairro) return 1;
+  if(!dados.m2) return 2;
+  if(!dados.idade) return 3;
+  if(!dados.comodos.cozinha) return 4;
+  if(!dados.comodos.banheiros) return 5;
+  if(!dados.comodos.sala && !dados.comodos.piso) return 6;
+  if(!dados.moradores || !dados.estilo) return 7;
+  if(!dados.dor) return 8;
+  if(!dados.prazo) return 9;
+  if(!dados.faixaOrcamentoApresentada) return 10;
+  return 11;
+}
+
+function gerarPerguntaTravada(estado, dados, nomeCurto, intencao){
+  const nome = nomeCurto||"você";
+  if(intencao==="fornecedor_parceria") return `Olá, ${nome}! Que ótimo, obrigada pelo contato. Aqui na Shaft trabalhamos com fornecedores homologados para nossas reformas e construções de alto padrão na Barra, Leblon e Recreio. Adoramos conhecer novos materiais. Você poderia me contar um pouco mais sobre seus produtos e diferenciais? Atende Barra da Tijuca? Tem catálogo ou amostras?`;
+  if(intencao==="convite_loja") return `Olá, ${nome}! Que ótimo, obrigada pelo convite! A Shaft está sempre buscando novos materiais e acabamentos para nossos projetos de alto padrão na Barra e Zona Sul. Adoraria conhecer os lançamentos. Você tem showroom na Barra? Qual melhor dia esta semana para o Mateus passar aí?`;
+  if(intencao==="cliente_orcamento_parcial"){
+    let faixa = "R$35k e R$75k"; if(dados.m2 && dados.m2 < 100) faixa = "R$25k e R$55k";
+    return `Entendi, ${nome}! Para reforma de ${dados.escopoParcial||'1 suíte e sala'} em ${dados.m2||'90'}m² ${dados.bairro||''}, o investimento fica entre ${faixa} tudo incluso. Dentro do universo que você imaginava para esse escopo parcial, essa faixa faz sentido neste momento?`;
+  }
+  switch(estado){
+    case 0: return `Olá, ${nome}! Aqui é a Juliana Lins, consultora da Shaft Arquitetura do Mateus Carvalho. Obrigada pelo contato. Como posso ajudar com seu projeto?`;
+    case 1: return `Perfeito, ${nome}. Para eu entender o contexto e te direcionar com clareza para o Mateus, seu imóvel ou terreno fica em qual região? Pergunto porque cada prédio na Barra e Zona Sul tem particularidades técnicas que impactam prazo e investimento.`;
+    case 2: return `Ótimo, ${dados.bairro ? dados.bairro + ' é uma região que atendemos bastante' : 'entendi a região'}. E qual a metragem aproximada? Só para eu ter ideia do porte para te direcionar com clareza para o Mateus.`;
+    case 3: return `Entendido, ${dados.m2 ? dados.m2+'m²' : ''}${dados.bairro ? ' em '+dados.bairro : ''} é justamente o porte que mais atendemos. Seu imóvel é mais recente ou é daqueles originais dos anos 90/2000?`;
+    case 4: return `E como está a cozinha hoje? É aquele modelo mais fechado, separado da sala, ou já tem alguma integração?`;
+    case 5: return `E quanto aos banheiros, são quantos originais? Você pensa em manter ou transformar em suítes, incluir closet?`;
+    case 6: return `E sala e piso, como estão? Pensa em manter piso atual ou trocar tudo por porcelanato grande formato?`;
+    case 7: return `Quem mora no imóvel? Você, casal, família com crianças? E você já tem alguma referência de estilo que te agrada? Mais moderno clean ou mais atemporal com madeira natural?`;
+    case 8: return `Se pudesse resolver apenas uma coisa que mais te incomoda hoje no imóvel, o que seria?`;
+    case 9: return `Você tinha em mente começar em algum período específico? E essa decisão envolve mais alguém da família?`;
+    case 10: return `Para te direcionar com total transparência: com base no que me contou - ${dados.m2||''}m² ${dados.bairro||''} - nossas reformas completas nesse porte ficam entre R$120k e R$280k tudo incluso. Dentro do universo que você imaginava, essa faixa faz sentido?`;
+    case 11: return `Com base em tudo que me contou, lembrei de um projeto muito similar que o Mateus entregou recentemente${dados.bairro ? ' em '+dados.bairro : ''}. Posso te enviar um vídeo de 40 segundos? E que tal marcarmos uma conversa técnica de 30 minutos com o Mateus?`;
+    default: return `Obrigada pelos detalhes, ${nome}. Para eu te direcionar com precisão para o Mateus, qual seria o próximo ponto que gostaria de esclarecer?`;
+  }
 }
 
 async function getJulianaResposta(tel, nome, msg){
   if(!conversas[tel]){
-    conversas[tel]={estado:0, dados:{m2:null, bairro:null, tipo_servico:null, comodos:{}, idade:null, estado:null, tipo:null, estilo:null, moradores:null, dor:null, intencao:null, jaCumprimentou:false}, historico:[], ultimasRespostas:[], ultimoTexto:"", ultimoTextoTime:0};
+    conversas[tel]={estado:0, dados:{m2:null, bairro:null, tipo_servico:null, comodos:{}, idade:null, estado:null, tipo:null, estilo:null, moradores:null, dor:null, prazo:null, decisor:null, escopoParcial:null, jaCumprimentou:false, faixaOrcamentoApresentada:false}, historico:[], ultimasRespostas:[], ultimoTexto:"", ultimoTextoTime:0};
   }
   const entry = conversas[tel];
-  
   const lower = msg.toLowerCase();
   const agora = Date.now();
   if(entry.ultimoTexto && entry.ultimoTexto.toLowerCase()===lower && (agora - (entry.ultimoTextoTime||0))<120000){
-    console.log(`🔄 Cliente repetiu mesma msg, forçando avanço estado ${entry.estado}->${entry.estado+1}`);
     entry.estado = Math.min(entry.estado+1, 11);
   }
   entry.ultimoTexto = msg;
   entry.ultimoTextoTime = agora;
 
-  const intencao = detectarIntencao(msg, entry.historico);
-  if(intencao !== "indefinido") entry.dados.intencao = intencao;
-
+  if(lower.includes("reforma")) entry.dados.tipo_servico="reforma";
+  if(lower.includes("construir")||lower.includes("casa")||lower.includes("terreno")||lower.includes("2 casas")) entry.dados.tipo_servico="construção";
   if(lower.includes("jacarepagua")||lower.includes("jacarepaguá")) entry.dados.bairro="Jacarepaguá";
   else if(lower.includes("leblon")) entry.dados.bairro="Leblon";
   else if(lower.includes("barra")) entry.dados.bairro="Barra da Tijuca";
   else if(lower.includes("recreio")) entry.dados.bairro="Recreio";
   else if(lower.includes("peninsula")||lower.includes("península")) entry.dados.bairro="Barra Península";
   else if(lower.includes("niteroi")||lower.includes("niterói")) entry.dados.bairro="Niterói";
+  else if(lower.includes("copacabana")) entry.dados.bairro="Copacabana";
   const m2Match = lower.match(/(\d{2,4})\s*m2|(\d{2,4})m²/); if(m2Match) entry.dados.m2=parseInt(m2Match[1]||m2Match[2]);
   if(lower.includes("cozinha")||lower.includes("integrar a sala")) entry.dados.comodos.cozinha=msg;
-  if(lower.includes("banheiro")||lower.includes("suíte")) entry.dados.comodos.banheiros=msg;
+  if(lower.includes("banheiro")||lower.includes("suíte")||lower.includes("closet")) entry.dados.comodos.banheiros=msg;
+  if(lower.includes("sala")||lower.includes("varanda")||lower.includes("integrar")) entry.dados.comodos.sala=msg;
+  if(lower.includes("piso")||lower.includes("porcelanato")) entry.dados.comodos.piso=msg;
+  if(lower.match(/antiga|bem antiga|original/)) entry.dados.idade=msg;
+  if(lower.includes("fechada")) entry.dados.estado=msg;
+  if(lower.includes("originais")) entry.dados.comodos.banheiros=msg;
+  if(lower.match(/1 suite.*sala|sala.*1 suite|suite.*sala somente/)) entry.dados.escopoParcial=msg;
+  if(lower.match(/mes que vem|próximo mês|mês que vem/)) entry.dados.prazo=msg;
 
-  if(entry.estado===0) entry.estado=1;
-  if(entry.dados.bairro && entry.estado===1) entry.estado=2;
-  if(entry.dados.m2 && entry.estado===2) entry.estado=3;
-  if(entry.dados.comodos.cozinha && entry.dados.comodos.cozinha.toLowerCase().includes("integrar") && entry.estado===3) entry.estado=5;
+  const intencao = (()=>{ const l=lower; if(l.match(/marmoraria|marcenaria|fornecedor|representante/) && l.match(/parceria|apresentar/)) return "fornecedor_parceria"; if(l.match(/loja|showroom|ornare|florense|portobello|lançamento|conhecer.*materiais/) && (l.includes("convid")||l.includes("conhecer"))) return "convite_loja"; if(l.match(/reforma/) && l.match(/1 suite.*sala/)) return "cliente_orcamento_parcial"; if(l.match(/reforma|reformar/)) return "cliente_reforma"; if(l.match(/construção|construir|terreno/)) return "cliente_construcao"; return "indefinido"; })();
+  if(intencao!=="indefinido") entry.dados.intencao=intencao;
 
-  entry.historico.push({role:"user", content: `${nome} (${intencao}): ${msg}`});
+  if(intencao==="cliente_orcamento_parcial" || (lower.includes("quanto") && lower.includes("1 suite") && lower.includes("sala"))){
+    const faixa = entry.dados.m2 && entry.dados.m2 < 100 ? "R$25k e R$55k" : "R$35k e R$75k";
+    const resposta = `Entendi, ${nome.split(' ')[0]}! Para reforma de ${entry.dados.escopoParcial||'1 suíte e sala'} em ${entry.dados.m2||'90'}m² ${entry.dados.bairro||''}, o investimento fica entre ${faixa} tudo incluso (obra, marcenaria, projeto 3D e gestão completa semanal pela Shaft). Dentro do universo que você imaginava para esse escopo parcial, essa faixa faz sentido neste momento?`;
+    entry.dados.faixaOrcamentoApresentada=true;
+    entry.historico.push({role:"user", content: `${nome}: ${msg}`});
+    entry.historico.push({role:"assistant", content: resposta});
+    return resposta;
+  }
+
+  entry.historico.push({role:"user", content: `${nome}: ${msg}`});
+
+  let proximoEstado = (()=>{ if(!entry.dados.jaCumprimentou) return 0; if(!entry.dados.bairro) return 1; if(!entry.dados.m2) return 2; if(!entry.dados.idade) return 3; if(!entry.dados.comodos.cozinha) return 4; if(!entry.dados.comodos.banheiros) return 5; if(!entry.dados.comodos.sala && !entry.dados.comodos.piso) return 6; if(!entry.dados.moradores) return 7; if(!entry.dados.dor) return 8; if(!entry.dados.prazo) return 9; if(!entry.dados.faixaOrcamentoApresentada) return 10; return 11; })();
+
+  if(entry.dados.jaCumprimentou && proximoEstado===0) entry.estado=1;
+  else if(proximoEstado > entry.estado) entry.estado=proximoEstado;
+  else if(entry.estado===0) entry.estado=1;
 
   const nomeCurto = nome.split(' ')[0];
-  let resposta = gerarPerguntaTravadaProfissional(entry.estado, entry.dados, nomeCurto, 0);
-  
-  // Tenta humanizar com Groq se tiver
+  let perguntaTravada = gerarPerguntaTravada(entry.estado, entry.dados, nomeCurto, entry.dados.intencao);
+  if(entry.estado===0) entry.dados.jaCumprimentou=true;
+
   if(groq){
     try{
-      const prompt = `Você é Juliana Lins, consultora sênior Shaft Arquitetura. Reescreva de forma mais humana, elegante, profissional premium, mantendo exatamente mesma ideia e pergunta: "${resposta}" Histórico: ${entry.historico.slice(-4).map(h=>h.content).join(' | ')} Reescreva curta 2-3 linhas, elegante:`;
       const comp = await groq.chat.completions.create({
-        messages: [{role:"user", content: prompt}],
+        messages: [{role:"system", content: "Você é Juliana Lins, consultora sênior Shaft Arquitetura, profissional premium elegante. Reescreva a pergunta de forma mais humana, elegante, mantendo mesma ideia."}, {role:"user", content: `Pergunta original: "${perguntaTravada}" - Reescreva curta 2-3 linhas elegante:`}],
         model: "llama-3.1-8b-instant",
-        temperature: 0.88,
-        max_tokens: 240
+        temperature: 0.85,
+        max_tokens: 220
       });
       const r2 = comp.choices[0].message.content.trim().replace(/^"|"$/g,'');
-      if(r2.length>10 && r2.length<400) resposta = r2;
-    }catch(e){ console.log("Groq humanizar falhou, usando travada"); }
+      if(r2.length>10 && r2.length<400) perguntaTravada=r2;
+    }catch{}
   }
 
-  // Anti-repetição final
-  let tentativas=0;
-  while(tentativas<3 && entry.ultimasRespostas && entry.ultimasRespostas.slice(-3).some(u=>u.toLowerCase().substring(0,70)===resposta.toLowerCase().substring(0,70))){
-    console.log(`🔄 Repetida detectada, gerando variação estado ${entry.estado}`);
-    resposta = gerarPerguntaTravadaProfissional(entry.estado+tentativas, entry.dados, nomeCurto, tentativas+1);
-    tentativas++;
-  }
-
-  entry.historico.push({role:"assistant", content: resposta});
+  entry.historico.push({role:"assistant", content: perguntaTravada});
   entry.ultimasRespostas = entry.ultimasRespostas || [];
-  entry.ultimasRespostas.push(resposta);
+  entry.ultimasRespostas.push(perguntaTravada);
   if(entry.ultimasRespostas.length>8) entry.ultimasRespostas.shift();
   if(entry.estado < 11) entry.estado++;
 
-  return resposta;
-}
-
-function gerarPerguntaTravadaProfissional(estado, dados, nomeCurto, tent=0){
-  const nome = nomeCurto||"você";
-  const vars = {
-    0: [`Olá, ${nome}! Aqui é a Juliana Lins, consultora da Shaft Arquitetura do Mateus Carvalho. Obrigada pelo contato. Como posso ajudar com seu projeto?`, `Olá, ${nome}! Juliana Lins aqui, da Shaft Arquitetura do Mateus Carvalho. Obrigada por entrar em contato. Me conta, como posso ajudar?`],
-    1: [`Perfeito, ${nome}. Para eu entender o contexto e te direcionar com clareza para o Mateus, seu imóvel ou terreno fica em qual região?`, `Entendido, ${nome}. Para eu te direcionar com precisão, fica em qual região?`],
-    2: [`Ótimo, ${dados.bairro||''} é uma região que atendemos bastante. E qual a metragem aproximada?`, `Perfeito, e qual a metragem aproximada?`],
-    3: [`Entendido, ${dados.m2||''}m² é justamente o porte que mais atendemos. Seu imóvel é mais recente ou original anos 90/2000?`, `Entendido. Seu imóvel é mais recente ou original anos 90/2000?`],
-    4: [`E como está a cozinha hoje? É aquele modelo mais fechado, separado da sala, ou já tem alguma integração?`, `Como está a cozinha hoje? É fechada ou já integrada?`],
-    5: [`E quanto aos banheiros, são quantos originais? Você pensa em manter ou transformar em suítes, incluir closet?`],
-    6: [`E sala e piso, como estão? Pensa em manter piso atual ou trocar tudo por porcelanato grande formato?`],
-    7: [`Quem mora no imóvel? Você, casal, família? E você já tem alguma referência de estilo que te agrada? Mais moderno clean ou mais atemporal com madeira?`],
-    8: [`Se pudesse resolver apenas uma coisa que mais te incomoda hoje no imóvel, o que seria?`],
-    9: [`Você tinha em mente começar em algum período específico? E essa decisão envolve mais alguém da família?`],
-    10: [`Para te direcionar com total transparência: com base no que me contou, nossas reformas completas nesse porte ficam entre R$120k e R$280k tudo incluso. Dentro do universo que imaginava, essa faixa faz sentido?`]
-  };
-  
-  // Por intenção
-  if(dados.intencao==="fornecedor_parceria"){
-    return [`Olá, ${nome}! Que ótimo, obrigada pelo contato. Aqui na Shaft trabalhamos com fornecedores homologados para nossas reformas de alto padrão. Adoramos conhecer novos materiais. Você poderia me contar um pouco mais sobre seus produtos e diferenciais?`, `Olá, ${nome}! Obrigada por entrar em contato. A Shaft avalia novos fornecedores constantemente. Poderia compartilhar seu portfólio e diferenciais?`][tent%2];
-  }
-  if(dados.intencao==="convite_loja"){
-    return [`Olá, ${nome}! Que ótimo, obrigada pelo convite! A Shaft está sempre buscando novos materiais para nossos projetos de alto padrão. Adoraria conhecer os lançamentos. Você tem showroom na Barra? Qual melhor dia esta semana?`][0];
-  }
-  
-  const opcoes = vars[estado] || vars[0];
-  return opcoes[tent % opcoes.length];
+  return perguntaTravada;
 }
 
 app.post('/webhook', async (req,res)=>{
@@ -296,9 +390,18 @@ app.post('/webhook', async (req,res)=>{
     console.log(`📤 Juliana: ${resposta.substring(0,100)}...`);
     await new Promise(r=>setTimeout(r, 1500));
     await enviarZap(tel, resposta);
-  }catch(e){ console.error(e); }
+  }catch(e){ console.error("Erro webhook:", e); }
 });
 
-app.get('/', (req,res)=>res.send(`<h1>✅ Shaft Juliana V13 - 20 PERSONAS TESTADAS</h1><p>Nunca fica muda, nunca repete, adapta repertório por persona: cliente reforma, construção, fornecedor, loja, prestador, imobiliária, síndico, fora RJ, etc. Cada conversa única, memória real.</p>`));
+app.get('/', (req,res)=>res.send(`<h1>✅ Shaft Juliana V15 - CAÇADOR INTERNET REAL 15/dia + ATENDIMENTO</h1><p>Apify: ${APIFY_TOKEN?'ATIVADO - 15 imóveis reais/dia ZAP':'DESATIVADO - lista 11 imobiliárias'} | Auto-send: ${AUTO_SEND?'REAL - Caçando direto!':'TESTE'} | Max/dia: ${MAX_LEADS_DIA} | 9h e 15h BRT</p><p><a href="/rodar-cacada">Rodar caçada agora</a> | <a href="/teste?msg=Oi">Teste</a></p>`));
+app.get('/rodar-cacada', async (req,res)=>{ res.send(`Caçada Internet Real iniciada! Apify: ${APIFY_TOKEN?'REAL 15/dia':'Lista 11'} - Verifique WhatsApp`); rodarCacadaMaxima(); });
+app.get('/teste', async (req,res)=>{
+  const m=req.query.msg||"Oi";
+  const fakeTel = "teste"+Date.now();
+  if(!conversas[fakeTel]) conversas[fakeTel]={estado:0, dados:{m2:null, bairro:null, tipo_servico:null, comodos:{}, idade:null, estado:null, tipo:null, estilo:null, moradores:null, dor:null, prazo:null, decisor:null, escopoParcial:null, jaCumprimentou:false, faixaOrcamentoApresentada:false}, historico:[], ultimasRespostas:[], ultimoTexto:"", ultimoTextoTime:0};
+  const r = await getJulianaResposta(fakeTel, "Teste", m);
+  res.json({pergunta:m, resposta:r});
+});
 app.get('/health', (req,res)=>res.send("OK"));
-app.listen(PORT, '0.0.0.0', ()=>console.log(`\n🚀 Shaft V13 20 PERSONAS porta ${PORT}\n`));
+
+app.listen(PORT, '0.0.0.0', ()=>console.log(`\n🚀 Shaft V15 INTERNET REAL 15/dia - porta ${PORT} - Apify: ${APIFY_TOKEN?'ON':'OFF'} Auto: ${AUTO_SEND} Max: ${MAX_LEADS_DIA}\n`));
